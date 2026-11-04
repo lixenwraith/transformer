@@ -1,0 +1,39 @@
+name: Test
+
+on:
+  push:
+    branches: [ main, 'claude/*' ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Vet, test and build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: go.mod
+        cache: false # A standard-library-only module has no go.sum.
+
+    - name: Vet code
+      run: go vet ./...
+
+    - name: Run tests with race detector
+      run: go test -race ./...
+      env:
+        GORACE: "halt_on_error=1"
+
+    - name: Build a 32-bit, a browser and an arm64 target
+      run: |
+        GOARCH=386 go build ./...
+        GOOS=js GOARCH=wasm go build ./...
+        GOARCH=arm64 go build ./...
