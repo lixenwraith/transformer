@@ -12,9 +12,9 @@ type Head struct {
 }
 
 // Conv is one convolution over the frames as an image, frames by features: Out
-// channels from the last's (one at the first), a kernel of Time frames by Freq
-// features centred on each, the edges zero, GELU, then the features max-pooled
-// by Pool, a remainder dropped
+// channels from the last's (the Config's at the first), a kernel of Time frames
+// by Freq features centred on each, the edges zero, GELU, then the features
+// max-pooled by Pool, a remainder dropped
 type Conv struct {
 	Out, Time, Freq, Pool int
 }
@@ -25,21 +25,25 @@ type Tower struct {
 	Layers, Outputs int
 }
 
-// Config is a model's shape: features in, the convolutions before the input
-// layer, the width, the attention heads and layers, the feed-forward width, the
-// frames attended to either side, the towers (none: one of Layers computing
-// every head), and the output heads.
+// Config is a model's shape: features in, the channels of them a frame lays end
+// to end (none: one), the convolutions before the input layer, the width, the
+// attention heads and layers, the feed-forward width, the frames attended to
+// either side, the towers (none: one of Layers computing every head), and the
+// output heads.
 type Config struct {
-	Inputs  int
-	Convs   []Conv
-	Dim     int
-	Heads   int
-	Layers  int
-	FFN     int
-	Window  int
-	Towers  []Tower
-	Outputs []Head
+	Inputs   int
+	Channels int
+	Convs    []Conv
+	Dim      int
+	Heads    int
+	Layers   int
+	FFN      int
+	Window   int
+	Towers   []Tower
+	Outputs  []Head
 }
+
+func (c Config) channels() int { return max(c.Channels, 1) }
 
 // towers is the Towers, or the one tower of Layers a Config without them has
 func (c Config) towers() []Tower {
@@ -58,10 +62,10 @@ func (c Config) outputSize() int {
 	return n
 }
 
-// features is what the input layer takes a frame as: the inputs, or the last
-// convolution's channels by the features its pooling leaves
+// features is what the input layer takes a frame as: the inputs by the channels,
+// or the last convolution's channels by the features its pooling leaves
 func (c Config) features() int {
-	n, ch := c.Inputs, 1
+	n, ch := c.Inputs, c.channels()
 	for _, cv := range c.Convs {
 		n, ch = n/max(cv.Pool, 1), cv.Out
 	}
@@ -84,7 +88,7 @@ func (c Config) validate() error {
 	switch {
 	case len(c.Towers) > 0 && heads != len(c.Outputs):
 		return fmt.Errorf("transformer: the towers compute %d heads of %d", heads, len(c.Outputs))
-	case c.Inputs < 1 || c.features() < 1 || c.Dim < 1 || c.Heads < 1 || c.Layers < 0 || c.FFN < 1 || c.Window < 0:
+	case c.Inputs < 1 || c.Channels < 0 || c.features() < 1 || c.Dim < 1 || c.Heads < 1 || c.Layers < 0 || c.FFN < 1 || c.Window < 0:
 		return errors.New("transformer: a size is not positive")
 	case c.Dim%c.Heads != 0:
 		return fmt.Errorf("transformer: width %d is not a multiple of %d heads", c.Dim, c.Heads)

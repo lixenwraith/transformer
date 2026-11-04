@@ -8,7 +8,7 @@ Priorities: P1 is wanted next, P2 is convenient follow-up, and P3 is an idea.
 
 A change to the file's bytes takes the next version: `fileVersion` in
 `weights.go`, the layout and the tensor list in [format.md](format.md), and a
-`Load` that still reads version 2, which every trained file carries. A field a
+`Load` that still reads versions 2 and 3, which trained files carry. A field a
 `Config` gains reads zero for today's behaviour, so every `Config` literal and
 every file keeps its meaning.
 
@@ -26,7 +26,7 @@ in `make` ("len out of range"), and one of 2^20 asks for 4 TiB. The fix sums the
 floats the shape needs from the `Config`, in overflow-checked products, and
 refuses past a cap, such as `maxTensor`'s 2^28 floats over the whole model,
 before `newModel` runs. `Forward` copies frames without checking their length: one
-longer than `Inputs` spills into the next frame's place, which a shorter next
+longer than `Inputs` × `Channels` spills into the next frame's place, which a shorter next
 frame does not wholly overwrite. It should refuse both.
 
 ## Position biases

@@ -2,7 +2,10 @@ package transformer
 
 import (
 	"bytes"
+	"encoding/binary"
+	"hash/fnv"
 	"math"
+	"slices"
 	"testing"
 )
 
@@ -102,11 +105,12 @@ func TestLayerNormAndGELU(t *testing.T) {
 }
 
 // TestWeightFileRoundTrips is the file's contract: what Save wrote, Load reads
-// into the same shape with the same outputs, convolutions and towers too, and a
-// damaged file is refused.
+// into the same shape with the same outputs, two channels, convolutions and
+// towers too, as it reads a version 2 file, and a damaged file is refused.
 func TestWeightFileRoundTrips(t *testing.T) {
 	cfg := tiny()
 	staged := tiny()
+	staged.Channels = 2
 	staged.Convs = []Conv{{Out: 2, Time: 3, Freq: 3, Pool: 1}, {Out: 3, Time: 1, Freq: 3, Pool: 2}}
 	staged.Towers = []Tower{{Layers: 1, Outputs: 1}, {Layers: 2, Outputs: 1}}
 	for _, c := range []Config{staged, cfg} {
@@ -122,7 +126,7 @@ func TestWeightFileRoundTrips(t *testing.T) {
 		if back.Parameters() != m.Parameters() || back.Config().outputSize() != c.outputSize() {
 			t.Fatalf("loaded %d parameters of %d", back.Parameters(), m.Parameters())
 		}
-		in := frames(7, c.Inputs, 5)
+		in := frames(7, c.Inputs*c.channels(), 5)
 		a, got := m.Forward(in), back.Forward(in)
 		for i := range a {
 			for j := range a[i] {
@@ -141,6 +145,19 @@ func TestWeightFileRoundTrips(t *testing.T) {
 	c := back.Forward(frames(7, cfg.Inputs, 5))
 	if sl := back.Slice(c[0], "b"); len(sl) != 2 || sl[0] != c[0][3] {
 		t.Errorf("head b slice %v of %v", sl, c[0])
+	}
+	f := b.Bytes() // as version 2 wrote it: no channels after the inputs
+	v2 := slices.Concat(f[:4], []byte{2, 0, 0, 0}, f[8:12], f[16:len(f)-8])
+	h := fnv.New64a()
+	h.Write(v2)
+	old, err := Load(bytes.NewReader(binary.LittleEndian.AppendUint64(v2, h.Sum64())))
+	if err != nil || old.Config().Channels != 1 {
+		t.Fatalf("a version 2 file: %v", err)
+	}
+	for i, o := range old.Forward(frames(7, cfg.Inputs, 5)) {
+		if !slices.Equal(o, c[i]) {
+			t.Fatalf("a version 2 file's frame %d: %v, want %v", i, o, c[i])
+		}
 	}
 	bad := bytes.Clone(b.Bytes())
 	bad[len(bad)/2] ^= 0x55

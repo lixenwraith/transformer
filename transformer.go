@@ -159,7 +159,7 @@ func newModel(cfg Config) (*Model, error) {
 		return nil, err
 	}
 	m := &Model{cfg: cfg, in: newLinear(cfg.features(), cfg.Dim)}
-	ch := 1
+	ch := cfg.channels()
 	for _, cv := range cfg.Convs {
 		m.convs = append(m.convs, conv{Conv: cv, in: ch, W: make([]float32, cv.Out*ch*cv.Time*cv.Freq), B: make([]float32, cv.Out)})
 		ch = cv.Out
@@ -236,16 +236,18 @@ func (m *Model) linears() []*linear {
 	return ls
 }
 
-// Forward runs frames, each of Inputs features, through the model and returns
-// one output vector per frame, the heads laid end to end as Config.Outputs.
+// Forward runs frames, each its channels of Inputs features end to end, through
+// the model and returns one output vector per frame, the heads laid end to end as
+// Config.Outputs.
 func (m *Model) Forward(frames [][]float32) [][]float32 {
 	T, cfg := len(frames), m.cfg
 	if T == 0 {
 		return nil
 	}
-	x := make([]float32, T*cfg.Inputs)
+	per := cfg.Inputs * cfg.channels()
+	x := make([]float32, T*per)
 	for t, f := range frames {
-		copy(x[t*cfg.Inputs:], f)
+		copy(x[t*per:], f)
 	}
 	for i, f := 0, cfg.Inputs; i < len(m.convs); i, f = i+1, f/m.convs[i].Pool {
 		x = m.convs[i].apply(x, T, f)

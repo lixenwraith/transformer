@@ -27,15 +27,16 @@ comes from any trainer that writes its weight file ([doc/format.md](doc/format.m
 
 ```go
 type Config struct {
-    Inputs  int     // features in a frame
-    Convs   []Conv  // convolutions before the input layer, none for a frame as it comes
-    Dim     int     // the width
-    Heads   int     // attention heads; Dim is a multiple of them
-    Layers  int     // blocks of the one stack, when there are no Towers
-    FFN     int     // the feed-forward's width
-    Window  int     // frames attended on either side
-    Towers  []Tower // stacks over the shared input layer, none for one stack of Layers
-    Outputs []Head  // the output vector's named slices, in order
+    Inputs   int     // features in a channel of a frame
+    Channels int     // planes of Inputs a frame lays end to end, none for one
+    Convs    []Conv  // convolutions before the input layer, none for a frame as it comes
+    Dim      int     // the width
+    Heads    int     // attention heads; Dim is a multiple of them
+    Layers   int     // blocks of the one stack, when there are no Towers
+    FFN      int     // the feed-forward's width
+    Window   int     // frames attended on either side
+    Towers   []Tower // stacks over the shared input layer, none for one stack of Layers
+    Outputs  []Head  // the output vector's named slices, in order
 }
 
 type Conv struct{ Out, Time, Freq, Pool int } // channels out, an odd kernel of frames by features, a max-pool over features
@@ -61,6 +62,9 @@ func (m *Model) Parameters() int
 
 ## The model
 
+- **Channels**: a frame may lay several planes of `Inputs` features end to end,
+  such as two views of one spectrum; the first convolution reads them as its
+  channels, or the input layer takes the frame whole.
 - **Convolutions**, optional, over the frames as an image, frames by features:
   each a kernel centred on a frame and a feature, the edges zero, a GELU, then a
   max-pool over the features.
@@ -158,8 +162,8 @@ func main() {
 
 - The file decides the shape. A caller that needs particular inputs or heads
   checks `m.Config()` after `Load`.
-- Every frame must hold exactly `Inputs` features. `Forward` does not check: a
-  longer frame spills into the next one's place ([todo](doc/todo.md)).
+- Every frame must hold exactly `Inputs` × `Channels` features. `Forward` does
+  not check: a longer frame spills into the next one's place ([todo](doc/todo.md)).
 - Outputs agree across platforms only to float32 rounding: arm64, and amd64 at
   `GOAMD64=v3`, fuse multiplies and adds, so their bits differ from amd64 v1 and
   386, which agree with each other.

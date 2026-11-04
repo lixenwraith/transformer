@@ -45,6 +45,11 @@ that a document now states, and link the document instead.
   outputs up to 6.4, and 1.8e-6 with the convolutions and towers, on outputs up
   to 2.7. A difference orders of magnitude past those is a mismatch, not
   rounding.
+- A change to the input checks both shapes again at `channels=2` too, on
+  `ripmodel.features(mel, 2)`. On 862 frames of a piano recording the largest
+  differences were 9.2e-6 at the default shape and 4.2e-6 to 5.4e-6 with the
+  convolutions and towers over three seeds, as one channel read on those frames
+  (3.1e-6 to 4.7e-6).
 
 ## Model
 

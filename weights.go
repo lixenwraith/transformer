@@ -9,16 +9,19 @@ import (
 	"hash/fnv"
 	"io"
 	"math"
+	"slices"
 )
 
 // The weight file: a magic and version, the Config, then every tensor by name
 // with its shape and float32 data, little-endian, and the FNV-1a 64 of all of it.
 // doc/format.md is its contract; a change to the bytes bumps fileVersion there.
+// Load reads oldestVersion on: a trained file keeps the version it was written in.
 const (
-	fileMagic   = "VIFT"
-	fileVersion = 2
-	maxName     = 64
-	maxTensor   = 1 << 28 // floats in one tensor
+	fileMagic     = "VIFT"
+	fileVersion   = 3
+	oldestVersion = 2
+	maxName       = 64
+	maxTensor     = 1 << 28 // floats in one tensor
 )
 
 type tensor struct {
@@ -78,6 +81,7 @@ func (m *Model) Save(w io.Writer) error {
 	put(uint32(fileVersion))
 	cfg := m.cfg
 	put(uint32(cfg.Inputs))
+	put(uint32(cfg.channels()))
 	put(uint32(cfg.Dim))
 	put(uint32(cfg.Heads))
 	put(uint32(cfg.Layers))
@@ -138,15 +142,22 @@ func Load(r io.Reader) (*Model, error) {
 	if _, err := io.ReadFull(br, magic); err != nil || string(magic) != fileMagic {
 		return nil, errors.New("transformer: not a weight file")
 	}
-	if err := get(&u32); err != nil || u32 != fileVersion {
-		return nil, fmt.Errorf("transformer: weight file version %d, want %d", u32, fileVersion)
+	if err := get(&u32); err != nil || u32 < oldestVersion || u32 > fileVersion {
+		return nil, fmt.Errorf("transformer: weight file version %d, want %d to %d", u32, oldestVersion, fileVersion)
 	}
-	var cfg Config
-	for _, p := range []*int{&cfg.Inputs, &cfg.Dim, &cfg.Heads, &cfg.Layers, &cfg.FFN, &cfg.Window} {
+	cfg := Config{Channels: 1} // a version 2 file has one and does not say so
+	sizes := []*int{&cfg.Inputs, &cfg.Channels, &cfg.Dim, &cfg.Heads, &cfg.Layers, &cfg.FFN, &cfg.Window}
+	if u32 == 2 {
+		sizes = slices.Delete(sizes, 1, 2)
+	}
+	for _, p := range sizes {
 		if err := get(&u32); err != nil {
 			return nil, err
 		}
 		*p = int(u32)
+	}
+	if cfg.Channels < 1 {
+		return nil, errors.New("transformer: no input channel")
 	}
 	if err := get(&u32); err != nil || u32 > 16 {
 		return nil, errors.New("transformer: convolutions")
