@@ -9,8 +9,9 @@ is padded or aligned.
 
 ```
 magic      4 bytes     "VIFT" (56 49 46 54)
-version    u32         2
-inputs     u32         features in a frame
+version    u32         3
+inputs     u32         features in a channel of a frame
+channels   u32         1 or more, the planes of inputs a frame lays end to end
 dim        u32         the width
 heads      u32         attention heads; dim is a multiple of them
 layers     u32         the one stack's blocks; read but unused when towers are given
@@ -38,14 +39,15 @@ checksum   u64         FNV-1a 64 of every byte before it
 ```
 
 The header carries the `Config`: `inputs` to `window` are its sizes, and the
-three lists its `Convs`, `Towers` and `Outputs`.
+three lists its `Convs`, `Towers` and `Outputs`. Version 2 has no `channels`
+word, and reads as one channel.
 
 ## The tensors
 
 The tensors come in this order, with these names and dims, and no others:
 
 ```
-convs.{i}.weight            out_i × in_i × time_i × freq_i    in_0 = 1, in_i = out_(i-1)
+convs.{i}.weight            out_i × in_i × time_i × freq_i    in_0 = channels, in_i = out_(i-1)
 convs.{i}.bias              out_i
 in.weight                   dim × features
 in.bias                     dim
@@ -74,9 +76,9 @@ of `layers` blocks when ntowers is 0:
 ```
 
 `i` counts convolutions, `t` towers and `j` a stack's blocks, each from 0.
-`features` is `inputs` without convolutions; with them it is n × out of the last,
-n starting at `inputs` and divided by each convolution's pool in turn, rounding
-down. A file holds 2·nconvs + 2 tensors before the stacks and 16·L + 4 for a
+`features` is n × c, n starting at `inputs` and c at `channels`, each
+convolution in turn dividing n by its pool, rounding down, and making c its
+`out`. A file holds 2·nconvs + 2 tensors before the stacks and 16·L + 4 for a
 stack of L blocks.
 
 A weight of out × in holds row o's in values from o·in on, which is PyTorch's
@@ -89,8 +91,10 @@ are `nn.LayerNorm`'s gain and shift.
 The `Config` fixes the computation, and a trainer's model computes this for its
 weights to mean the same here:
 
-1. A sequence is T frames of `inputs` features. With convolutions the frames
-   are an image of one channel, frames by features. Convolution i writes, for
+1. A sequence is T frames of `channels` × `inputs` features, channel c's from
+   c·inputs on. With convolutions the frames are an image of `channels`
+   channels, frames by features; without, a frame goes to the input layer as it
+   comes. Convolution i writes, for
    each channel o, frame t and feature k, its bias plus the sum over channels c
    in and the kernel of weight[o][c][dt][df] × x[c][t + dt − time/2][k + df −
    freq/2], the halves rounded down and zero past the image's edges
@@ -125,12 +129,12 @@ with a PyTorch model in float32 to rounding ([agent notes](agent-notes.md)).
 
 - it is at least 8 bytes, and its last 8 are the FNV-1a 64 (offset basis
   0xcbf29ce484222325, prime 0x100000001b3) of every byte before them;
-- the magic is `VIFT` and the version 2;
+- the magic is `VIFT` and the version 2 or 3;
 - it has at most 16 convolutions, at most 16 towers and 1 to 64 output heads;
 - each convolution has `out` and `pool` of 1 or more and odd `time` and `freq`;
 - each tower computes 1 or more heads and, with towers, theirs sum to `nheads`;
-- `inputs`, `features`, `dim`, `heads` and `ffn` are 1 or more, and `dim` a
-  multiple of `heads`;
+- `inputs`, `channels`, `features`, `dim`, `heads` and `ffn` are 1 or more, and
+  `dim` a multiple of `heads`;
 - the output heads' names are 1 to 64 bytes and distinct, and each size is 1 or
   more;
 - the tensors are the list above in count, names, ranks and dims, each of at
@@ -146,5 +150,6 @@ an error ([todo](todo.md)).
 
 The version is the layout's: a change to these bytes bumps it, in
 `fileVersion` and here in one commit, and `Load` reads the versions it knows.
-Version 2 is the only one today. Every file trained so far carries the magic
-`VIFT`, so a new magic is a versioned change of its own ([todo](todo.md)).
+`Save` writes 3, which added `channels`; `Load` reads 2 as well, since most
+trained files carry it. Every file trained so far carries the magic `VIFT`, so
+a new magic is a versioned change of its own ([todo](todo.md)).
