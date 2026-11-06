@@ -17,6 +17,19 @@ that a document now states, and link the document instead.
   `GOAMD64=v3`, so `Forward`'s bits differ there from amd64 v1's and 386's (which
   agree), by float32 rounding. Compare bits within one platform, and across
   platforms with a tolerance.
+- Under `-cpu 1,4` the first row a process prints for a `b.Loop` benchmark ran
+  at the list's last value, which the tests' loop over `-cpu` left set: run one
+  `-cpu` value a process.
+
+## Kernels
+
+- `dotGeneric` and `axpyGeneric` sum in `Forward`'s old order, a dot from its
+  bias, so 386, wasm and amd64 without AVX2 keep their bits. To check the plain
+  path on an AVX2 machine, set `avx2FMA` false in a scratch edit and compare a
+  saved file's outputs with main's.
+- `TestKernelsMatchThePlainLoops` runs the NEON kernels under qemu (above); a
+  kernel writing past its slice crashes that run in the runtime rather than
+  failing the test. Speed needs a real arm64 device.
 
 ## The float32 check
 
