@@ -23,13 +23,14 @@ func newLinear(in, out int) linear {
 	return linear{In: in, Out: out, W: make([]float32, out*in), B: make([]float32, out)}
 }
 
-// apply writes x (frames × In) through the layer into y (frames × Out)
+// apply writes x (frames × In) through the layer into y (frames × Out), a
+// weight row at a time for a block of frames
 func (l *linear) apply(x []float32, frames int, y []float32) {
 	across(frames, func(lo, hi int) {
-		for t := lo; t < hi; t++ {
-			xt, yt := x[t*l.In:(t+1)*l.In], y[t*l.Out:(t+1)*l.Out]
-			for o := range l.Out {
-				yt[o] = dot(l.B[o], l.W[o*l.In:(o+1)*l.In], xt)
+		for o := range l.Out {
+			w := l.W[o*l.In : (o+1)*l.In]
+			for t := lo; t < hi; t++ {
+				y[t*l.Out+o] = dot(l.B[o], w, x[t*l.In:(t+1)*l.In])
 			}
 		}
 	})
@@ -53,26 +54,31 @@ func axpyGeneric(w float32, x, y []float32) {
 	}
 }
 
-// across hands 0 to n-1 in chunks to GOMAXPROCS goroutines, each taking the
-// next chunk as it finishes one. f must write only its chunk's outputs, so the
-// bits never depend on the split.
+// frameBlock is the frames f takes at once: few enough that a slow core's last
+// block barely delays the rest, enough that a weight row read once serves them
+const frameBlock = 8
+
+// across hands 0 to n-1 in blocks to up to GOMAXPROCS goroutines, each taking
+// the next block as it finishes one, and to none under two blocks. f must write
+// only its block's outputs, so the bits never depend on the split.
 func across(n int, f func(lo, hi int)) {
-	procs := min(runtime.GOMAXPROCS(0), n)
+	procs := min(runtime.GOMAXPROCS(0), (n+frameBlock-1)/frameBlock)
 	if procs < 2 {
-		f(0, n)
+		for lo := 0; lo < n; lo += frameBlock {
+			f(lo, min(lo+frameBlock, n))
+		}
 		return
 	}
-	chunk := max(n/(procs*4), 1)
 	var next atomic.Int64
 	var wg sync.WaitGroup
 	for range procs {
 		wg.Go(func() {
 			for {
-				lo := int(next.Add(int64(chunk))) - chunk
+				lo := int(next.Add(frameBlock)) - frameBlock
 				if lo >= n {
 					return
 				}
-				f(lo, min(lo+chunk, n))
+				f(lo, min(lo+frameBlock, n))
 			}
 		})
 	}
