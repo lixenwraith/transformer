@@ -66,6 +66,16 @@ that a document now states, and link the document instead.
   convolutions and towers over three seeds, as one channel read on those frames
   (3.1e-6 to 4.7e-6).
 
+- The cell net's check is the rip trainer's `PitchNet` (`ripmodel.py` in
+  stapes), whose `export` writes version 4: build it at the trainer's shape,
+  perturb every parameter as above, run the output of `features(mel, 2)`
+  through it, and dump `model.stack(x)`, the 16 channels of 214 Go reads, with
+  the outputs. Its heads lie in the trainer's order, so compare them by name
+  (`Slice`). On 600 and 2000 frames over three seeds the largest differences
+  were 2.4e-6 to 5.1e-6 on outputs up to 4.3 to 11.1, and the bits the same on
+  one to four cores. `TestCellNetMatchesItsDefinition` covers what PitchNet
+  has none of yet: two `near` convolutions, a cell head of two channels.
+
 ## Model
 
 - `Conv` and `Tower` are in no trained file yet, but trainers try them in their

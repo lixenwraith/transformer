@@ -8,7 +8,7 @@ Priorities: P1 is wanted next, P2 is convenient follow-up, and P3 is an idea.
 
 A change to the file's bytes takes the next version: `fileVersion` in
 `weights.go`, the layout and the tensor list in [format.md](format.md), and a
-`Load` that still reads versions 2 and 3, which trained files carry. A field a
+`Load` that still reads versions 2 to 4, which trained files carry. A field a
 `Config` gains reads zero for today's behaviour, so every `Config` literal and
 every file keeps its meaning.
 
@@ -18,7 +18,7 @@ every file keeps its meaning.
 
 - Priority: P2
 - Affected files: `weights.go` (`Load`), `config.go`, `transformer.go`
-  (`newModel`, `Forward`)
+  (`newModel`, `Forward`), `cells.go`
 
 `Load` hands the header's `Config` to `newModel`, which allocates every tensor
 before the tensors' own checks run: a 59-byte file naming a width of 2^24 panics
@@ -65,6 +65,31 @@ A frame is 256 samples at 22050 Hz to the rip, 86 a second of audio. A 30 s rip
 with 12a on the Pixel, 2584 frames, takes 2.56 s on one core and 1.07 s on
 nine. `GOEXPERIMENT=simd`'s package would make every importer set the
 experiment, so the kernels are assembly.
+
+`BenchmarkCellNet` is the rip's notes model: 169,862 weights, 16 channels of
+214 inputs, 71 cells, 318 outputs, 5.6 million multiplies a frame, 512 frames.
+Medians of three to five, one `-cpu` a process:
+
+```
+                                    1 core                4 cores
+4-vCPU Xeon 2.1 GHz, AVX2
+  plain loops                       1.77 s    290 frames/s   0.50 s   1026 frames/s
+  AVX2 kernels, blocks over cores   0.34 s   1500 frames/s   0.094 s  5430 frames/s
+```
+
+### Make the cell net's pass cheaper
+
+- Priority: P2
+- Affected files: `cells.go`, `transformer.go` (`gelu`), `kernel_*`
+
+On one core the profile gives the GELU 37% (its float64 `math.Erf`, eleven
+thousand a frame), `dot` 50% and the rest the loops. `dot` reads two floats a
+multiply, so a kernel of four weight rows against one or two patches, which
+shares its loads, would near double it: `conv.run` dots every output channel
+against one patch. A scalar GELU over Numerical Recipes' `erfc` and a polynomial
+`exp` measured 21 ns against `math.Erf`'s 35, within 1.8e-7, about 1.2 times the
+pass, and would move a transformer's bits too; a GELU over a row in the vector
+kernels is the larger step.
 
 ### Make a phone's cores beat one at 512 frames
 

@@ -14,13 +14,22 @@ func tiny() Config {
 		Outputs: []Head{{"a", 3}, {"b", 2}}}
 }
 
+// tinyCells is a cell net of every part, three channels of 21 inputs, seven
+// cells, two convolutions over them and a cell head of two channels
+func tinyCells() Config {
+	return Config{Inputs: 21, Channels: 3, Outputs: []Head{{"c1", 5}, {"c2", 10}, {"f", 3}}, Cells: &Cells{
+		Bins: 20, Reduce: 2, Wide: 3, WideTime: 3, WideFreq: 5, Cell: 4, CellTime: 3, CellFreq: 3, Stride: 3, Depth: 2, NearTime: 3, NearFreq: 3,
+		First: 1, Read: 5, Heads: 2, Regions: 4, Scalars: []int{20, 62}, Frame: 5, FrameTime: 3, AgainTime: 3, Dilation: 2}}
+}
+
 func frames(T, n int, seed uint64) [][]float32 {
 	m, _ := NewRandom(Config{Inputs: 1, Dim: n, Heads: 1, Layers: 0, FFN: 1, Window: 0, Outputs: []Head{{"x", 1}}}, seed)
+	w := m.net.(*transformerNet).in.W
 	out := make([][]float32, T)
 	for t := range out {
 		out[t] = make([]float32, n)
 		for i := range out[t] {
-			out[t][i] = m.in.W[(i+t*n)%len(m.in.W)]
+			out[t][i] = w[(i+t*n)%len(w)]
 		}
 	}
 	return out
@@ -30,10 +39,11 @@ func frames(T, n int, seed uint64) [][]float32 {
 // plain float64 attention over the same window, slopes included.
 func TestAttentionMatchesTheDenseReference(t *testing.T) {
 	cfg := tiny()
-	m, err := NewRandom(cfg, 7)
+	mm, err := NewRandom(cfg, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
+	m := mm.net.(*transformerNet)
 	const T = 9
 	q, k, v := frames(T, cfg.Dim, 1), frames(T, cfg.Dim, 2), frames(T, cfg.Dim, 3)
 	flat := func(f [][]float32) []float32 {
@@ -105,15 +115,16 @@ func TestLayerNormAndGELU(t *testing.T) {
 }
 
 // TestWeightFileRoundTrips is the file's contract: what Save wrote, Load reads
-// into the same shape with the same outputs, two channels, convolutions and
-// towers too, as it reads a version 2 file, and a damaged file is refused.
+// into the same shape with the same outputs, two channels, convolutions,
+// towers and a cell net too, as it reads versions 2 and 3, and a damaged file
+// is refused.
 func TestWeightFileRoundTrips(t *testing.T) {
 	cfg := tiny()
 	staged := tiny()
 	staged.Channels = 2
 	staged.Convs = []Conv{{Out: 2, Time: 3, Freq: 3, Pool: 1}, {Out: 3, Time: 1, Freq: 3, Pool: 2}}
 	staged.Towers = []Tower{{Layers: 1, Outputs: 1}, {Layers: 2, Outputs: 1}}
-	for _, c := range []Config{staged, cfg} {
+	for _, c := range []Config{staged, tinyCells(), cfg} {
 		m, _ := NewRandom(c, 11)
 		var b bytes.Buffer
 		if err := m.Save(&b); err != nil {
@@ -146,17 +157,18 @@ func TestWeightFileRoundTrips(t *testing.T) {
 	if sl := back.Slice(c[0], "b"); len(sl) != 2 || sl[0] != c[0][3] {
 		t.Errorf("head b slice %v of %v", sl, c[0])
 	}
-	f := b.Bytes() // as version 2 wrote it: no channels after the inputs
-	v2 := slices.Concat(f[:4], []byte{2, 0, 0, 0}, f[8:12], f[16:len(f)-8])
-	h := fnv.New64a()
-	h.Write(v2)
-	old, err := Load(bytes.NewReader(binary.LittleEndian.AppendUint64(v2, h.Sum64())))
-	if err != nil || old.Config().Channels != 1 {
-		t.Fatalf("a version 2 file: %v", err)
-	}
-	for i, o := range old.Forward(frames(7, cfg.Inputs, 5)) {
-		if !slices.Equal(o, c[i]) {
-			t.Fatalf("a version 2 file's frame %d: %v, want %v", i, o, c[i])
+	f := b.Bytes() // as version 3 wrote it, no kind after the version, and 2, no channels after the inputs
+	for v, old := range map[byte][]byte{3: slices.Concat(f[:4], []byte{3, 0, 0, 0}, f[12:len(f)-8]), 2: slices.Concat(f[:4], []byte{2, 0, 0, 0}, f[12:16], f[20:len(f)-8])} {
+		h := fnv.New64a()
+		h.Write(old)
+		m, err := Load(bytes.NewReader(binary.LittleEndian.AppendUint64(old, h.Sum64())))
+		if err != nil || m.Config().Channels != 1 {
+			t.Fatalf("a version %d file: %v", v, err)
+		}
+		for i, o := range m.Forward(frames(7, cfg.Inputs, 5)) {
+			if !slices.Equal(o, c[i]) {
+				t.Fatalf("a version %d file's frame %d: %v, want %v", v, i, o, c[i])
+			}
 		}
 	}
 	bad := bytes.Clone(b.Bytes())
@@ -175,7 +187,7 @@ func TestWeightFileRoundTrips(t *testing.T) {
 func TestConvolutionMatchesItsDefinition(t *testing.T) {
 	const T, F = 6, 5
 	m, _ := NewRandom(Config{Inputs: F, Convs: []Conv{{Out: 2, Time: 3, Freq: 3, Pool: 2}}, Dim: 2, Heads: 1, FFN: 1, Outputs: []Head{{"x", 1}}}, 4)
-	c := m.convs[0]
+	c := m.net.(*transformerNet).convs[0]
 	for o := range c.B {
 		c.B[o] = 0.1 * float32(o+1)
 	}
@@ -204,6 +216,116 @@ func TestConvolutionMatchesItsDefinition(t *testing.T) {
 				if math.Abs(float64(w-g)) > 1e-6 {
 					t.Fatalf("frame %d channel %d feature %d: %g, want %g", tt, o, k, g, w)
 				}
+			}
+		}
+	}
+}
+
+// TestCellNetMatchesItsDefinition: each output is the cell net's layers as
+// format.md states them, run in float64 over the whole sequence as PyTorch pads
+// it, though Forward runs it in blocks over cores, its biases not zero, a cell
+// head of two channels laid one channel's cells after the other's.
+func TestCellNetMatchesItsDefinition(t *testing.T) {
+	cfg := tinyCells()
+	m, _ := NewRandom(cfg, 5)
+	n := m.net.(*cellNet)
+	for i, tn := range n.tensors() {
+		if len(tn.dims) == 1 {
+			copy(tn.data, frames(1, len(tn.data), uint64(i))[0])
+		}
+	}
+	const T = 3*cellBlock + 5
+	in := frames(T, cfg.Inputs*cfg.Channels, 3)
+	got := m.Forward(in)
+	c, ch := cfg.Cells, cfg.Channels
+	// conv is a layer over x, channels by frames by features, padded with zeros
+	conv := func(x [][][]float64, l *conv, padT, padF, stride, dil, width int) [][][]float64 {
+		y := make([][][]float64, l.Out)
+		for o := range y {
+			y[o] = make([][]float64, T)
+			for tt := range T {
+				y[o][tt] = make([]float64, width)
+				for j := range width {
+					s := float64(l.B[o])
+					for i := range l.in {
+						for dt := range l.Time {
+							for dk := range l.Freq {
+								u, k := tt+dt*dil-padT, j*stride+dk-padF
+								if u >= 0 && u < T && k >= 0 && k < len(x[i][u]) {
+									s += float64(l.W[((o*l.in+i)*l.Time+dt)*l.Freq+dk]) * x[i][u][k]
+								}
+							}
+						}
+					}
+					y[o][tt][j] = s
+				}
+			}
+		}
+		return y
+	}
+	g := func(x [][][]float64, add [][][]float64) [][][]float64 {
+		for o := range x {
+			for tt := range x[o] {
+				for j := range x[o][tt] {
+					if add != nil {
+						x[o][tt][j] += add[o][tt][j]
+					}
+					x[o][tt][j] = 0.5 * x[o][tt][j] * (1 + math.Erf(x[o][tt][j]/math.Sqrt2))
+				}
+			}
+		}
+		return x
+	}
+	x := make([][][]float64, ch)
+	for i := range x {
+		x[i] = make([][]float64, T)
+		for tt := range T {
+			for k := range c.Bins {
+				x[i][tt] = append(x[i][tt], float64(in[tt][i*cfg.Inputs+k]))
+			}
+		}
+	}
+	reduced := g(conv(x, &n.reduce, 0, 0, 1, 1, c.Bins), nil)
+	wide := g(conv(reduced, &n.wide, c.WideTime/2, c.WideFreq/2, 1, 1, c.Bins), nil)
+	cells := g(conv(wide, &n.cells, c.CellTime/2, c.CellFreq/2, c.Stride, 1, c.cells()), nil)
+	for i := range n.near {
+		cells = g(conv(cells, &n.near[i], c.NearTime/2, c.NearFreq/2, 1, 1, c.cells()), cells)
+	}
+	heads := conv(cells, &n.cellout, 0, 0, 1, 1, c.cells())
+	pooled := make([][][]float64, c.pooled())
+	for i := range pooled {
+		pooled[i] = make([][]float64, T)
+		for tt := range T {
+			if i >= c.Wide*c.Regions {
+				pooled[i][tt] = []float64{float64(in[tt][c.Scalars[i-c.Wide*c.Regions]])}
+				continue
+			}
+			r := i % c.Regions
+			from, to := r*c.Bins/c.Regions, int(math.Ceil(float64((r+1)*c.Bins)/float64(c.Regions)))
+			var s float64
+			for k := from; k < to; k++ {
+				s += wide[i/c.Regions][tt][k]
+			}
+			pooled[i][tt] = []float64{s / float64(to-from)}
+		}
+	}
+	f1 := g(conv(pooled, &n.frame1, c.FrameTime/2, 0, 1, 1, 1), nil)
+	f2 := g(conv(f1, &n.frame2, c.Dilation*(c.AgainTime/2), 0, 1, c.Dilation, 1), f1)
+	for tt := range T {
+		want := make([]float64, 0, cfg.outputSize())
+		for ch := range n.cellout.Out {
+			want = append(want, heads[ch][tt][c.First:c.First+c.Read]...)
+		}
+		for o := range n.frameout.Out {
+			s := float64(n.frameout.B[o])
+			for i := range c.Frame {
+				s += float64(n.frameout.W[o*c.Frame+i]) * f2[i][tt][0]
+			}
+			want = append(want, s)
+		}
+		for i, w := range want {
+			if d := math.Abs(float64(got[tt][i]) - w); d > 1e-5*(1+math.Abs(w)) {
+				t.Fatalf("frame %d output %d: %g, want %g", tt, i, got[tt][i], w)
 			}
 		}
 	}
@@ -307,4 +429,23 @@ func BenchmarkKernels(b *testing.B) {
 			}
 		})
 	}
+}
+
+// BenchmarkCellNet is the cell net's: 169,862 weights, the rip's notes model of
+// 16 channels of 214 inputs, 71 cells and 318 outputs, over 512 frames.
+func BenchmarkCellNet(b *testing.B) {
+	const T = 512
+	cfg := Config{Inputs: 214, Channels: 16, Outputs: []Head{{"pitch", 69}, {"strike", 69}, {"release", 69}, {"velocity", 69}, {"frame", 42}}, Cells: &Cells{
+		Bins: 213, Reduce: 8, Wide: 16, WideTime: 3, WideFreq: 39, Cell: 32, CellTime: 7, CellFreq: 3, Stride: 3, Depth: 1, NearTime: 7, NearFreq: 3,
+		First: 1, Read: 69, Heads: 4, Regions: 16, Scalars: []int{213, 1925}, Frame: 64, FrameTime: 5, AgainTime: 9, Dilation: 2}}
+	m, err := NewRandom(cfg, 1)
+	if err != nil {
+		b.Fatal(err)
+	}
+	in := frames(T, cfg.Inputs*cfg.Channels, 2)
+	b.ReportAllocs()
+	for b.Loop() {
+		m.Forward(in)
+	}
+	b.ReportMetric(float64(T*b.N)/b.Elapsed().Seconds(), "frames/s")
 }
