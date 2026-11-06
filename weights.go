@@ -9,7 +9,6 @@ import (
 	"hash/fnv"
 	"io"
 	"math"
-	"slices"
 )
 
 // The weight file: a magic and version, the Config, then every tensor by name
@@ -18,7 +17,7 @@ import (
 // Load reads oldestVersion on: a trained file keeps the version it was written in.
 const (
 	fileMagic     = "VIFT"
-	fileVersion   = 3
+	fileVersion   = 4
 	oldestVersion = 2
 	maxName       = 64
 	maxTensor     = 1 << 28 // floats in one tensor
@@ -30,8 +29,7 @@ type tensor struct {
 	data []float32
 }
 
-// tensors names every weight in the order the file holds them
-func (m *Model) tensors() []tensor {
+func (m *transformerNet) tensors() []tensor {
 	lin := func(name string, l *linear) []tensor {
 		return []tensor{{name + ".weight", []int{l.Out, l.In}, l.W}, {name + ".bias", []int{l.Out}, l.B}}
 	}
@@ -77,31 +75,22 @@ func (m *Model) Save(w io.Writer) error {
 	put := func(v any) {
 		binary.Write(bw, le, v)
 	}
+	ints := func(vs ...int) {
+		for _, v := range vs {
+			put(uint32(v))
+		}
+	}
 	bw.WriteString(fileMagic)
-	put(uint32(fileVersion))
 	cfg := m.cfg
-	put(uint32(cfg.Inputs))
-	put(uint32(cfg.channels()))
-	put(uint32(cfg.Dim))
-	put(uint32(cfg.Heads))
-	put(uint32(cfg.Layers))
-	put(uint32(cfg.FFN))
-	put(uint32(cfg.Window))
-	put(uint32(len(cfg.Convs)))
-	for _, c := range cfg.Convs {
-		put([4]uint32{uint32(c.Out), uint32(c.Time), uint32(c.Freq), uint32(c.Pool)})
-	}
-	put(uint32(len(cfg.Towers)))
-	for _, t := range cfg.Towers {
-		put([2]uint32{uint32(t.Layers), uint32(t.Outputs)})
-	}
+	ints(fileVersion, cfg.kind(), cfg.Inputs, cfg.channels())
+	kinds[cfg.kind()].save(ints, cfg)
 	put(uint32(len(cfg.Outputs)))
 	for _, o := range cfg.Outputs {
 		put(uint16(len(o.Name)))
 		bw.WriteString(o.Name)
 		put(uint32(o.Size))
 	}
-	ts := m.tensors()
+	ts := m.net.tensors()
 	put(uint32(len(ts)))
 	for _, t := range ts {
 		put(uint16(len(t.name)))
@@ -145,39 +134,31 @@ func Load(r io.Reader) (*Model, error) {
 	if err := get(&u32); err != nil || u32 < oldestVersion || u32 > fileVersion {
 		return nil, fmt.Errorf("transformer: weight file version %d, want %d to %d", u32, oldestVersion, fileVersion)
 	}
-	cfg := Config{Channels: 1} // a version 2 file has one and does not say so
-	sizes := []*int{&cfg.Inputs, &cfg.Channels, &cfg.Dim, &cfg.Heads, &cfg.Layers, &cfg.FFN, &cfg.Window}
-	if u32 == 2 {
-		sizes = slices.Delete(sizes, 1, 2)
+	version := u32
+	geti := func() (int, error) {
+		err := get(&u32)
+		return int(u32), err
 	}
-	for _, p := range sizes {
-		if err := get(&u32); err != nil {
-			return nil, err
-		}
-		*p = int(u32)
+	cfg := Config{Channels: 1} // a version 2 file has one and does not say so
+	kind := kindTransformer
+	sizes := []*int{&kind, &cfg.Inputs, &cfg.Channels}
+	if version < 4 {
+		sizes = sizes[1:]
+	}
+	if version == 2 {
+		sizes = sizes[:1]
+	}
+	if err := fill(geti, sizes...); err != nil {
+		return nil, err
+	}
+	if kind >= len(kinds) || kind < 0 {
+		return nil, fmt.Errorf("transformer: model kind %d", kind)
 	}
 	if cfg.Channels < 1 {
 		return nil, errors.New("transformer: no input channel")
 	}
-	if err := get(&u32); err != nil || u32 > 16 {
-		return nil, errors.New("transformer: convolutions")
-	}
-	for range u32 {
-		var c [4]uint32
-		if err := get(&c); err != nil {
-			return nil, err
-		}
-		cfg.Convs = append(cfg.Convs, Conv{Out: int(c[0]), Time: int(c[1]), Freq: int(c[2]), Pool: int(c[3])})
-	}
-	if err := get(&u32); err != nil || u32 > 16 {
-		return nil, errors.New("transformer: towers")
-	}
-	for range u32 {
-		var t [2]uint32
-		if err := get(&t); err != nil {
-			return nil, err
-		}
-		cfg.Towers = append(cfg.Towers, Tower{Layers: int(t[0]), Outputs: int(t[1])})
+	if err := kinds[kind].load(geti, &cfg); err != nil {
+		return nil, err
 	}
 	if err := get(&u32); err != nil || u32 > 64 {
 		return nil, errors.New("transformer: output heads")
@@ -206,7 +187,7 @@ func Load(r io.Reader) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	want := m.tensors()
+	want := m.net.tensors()
 	if err := get(&u32); err != nil || int(u32) != len(want) {
 		return nil, fmt.Errorf("transformer: %d tensors, the shape wants %d", u32, len(want))
 	}
@@ -241,4 +222,84 @@ func Load(r io.Reader) (*Model, error) {
 		return nil, errors.New("transformer: weight file has bytes past its tensors")
 	}
 	return m, nil
+}
+
+// fill reads the next sizes of the file into ps in turn
+func fill(get func() (int, error), ps ...*int) error {
+	for _, p := range ps {
+		v, err := get()
+		if err != nil {
+			return err
+		}
+		*p = v
+	}
+	return nil
+}
+
+func saveTransformer(put func(...int), c Config) {
+	put(c.Dim, c.Heads, c.Layers, c.FFN, c.Window, len(c.Convs))
+	for _, cv := range c.Convs {
+		put(cv.Out, cv.Time, cv.Freq, cv.Pool)
+	}
+	put(len(c.Towers))
+	for _, t := range c.Towers {
+		put(t.Layers, t.Outputs)
+	}
+}
+
+func loadTransformer(get func() (int, error), c *Config) error {
+	var n int
+	if err := fill(get, &c.Dim, &c.Heads, &c.Layers, &c.FFN, &c.Window, &n); err != nil || n < 0 || n > 16 {
+		return errors.New("transformer: convolutions")
+	}
+	for range n {
+		var cv Conv
+		if err := fill(get, &cv.Out, &cv.Time, &cv.Freq, &cv.Pool); err != nil {
+			return err
+		}
+		c.Convs = append(c.Convs, cv)
+	}
+	if err := fill(get, &n); err != nil || n < 0 || n > 16 {
+		return errors.New("transformer: towers")
+	}
+	for range n {
+		var t Tower
+		if err := fill(get, &t.Layers, &t.Outputs); err != nil {
+			return err
+		}
+		c.Towers = append(c.Towers, t)
+	}
+	return nil
+}
+
+// sizes are a cell net's sizes in the order the file holds them, Scalars after
+func (c *Cells) sizes() []*int {
+	return []*int{&c.Bins, &c.Reduce, &c.Wide, &c.WideTime, &c.WideFreq, &c.Cell, &c.CellTime, &c.CellFreq, &c.Stride,
+		&c.NearTime, &c.NearFreq, &c.First, &c.Heads, &c.Regions, &c.Frame, &c.FrameTime, &c.AgainTime, &c.Dilation}
+}
+
+// maxScalars bounds a cell net's scalars before its Config is checked
+const maxScalars = 64
+
+func saveCells(put func(...int), c Config) {
+	for _, p := range c.Cells.sizes() {
+		put(*p)
+	}
+	put(len(c.Cells.Scalars))
+	put(c.Cells.Scalars...)
+}
+
+func loadCells(get func() (int, error), c *Config) error {
+	c.Cells = &Cells{}
+	var n int
+	if err := fill(get, append(c.Cells.sizes(), &n)...); err != nil || n < 0 || n > maxScalars {
+		return errors.New("transformer: a cell net's sizes")
+	}
+	c.Cells.Scalars = make([]int, n)
+	for i := range c.Cells.Scalars {
+		if err := fill(get, &c.Cells.Scalars[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }

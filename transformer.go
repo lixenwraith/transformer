@@ -1,7 +1,7 @@
-// Package transformer runs small transformer models over sequences of frames in
-// Go, for inference: convolutions over the frames as an image, a linear
-// input, pre-norm attention blocks with ALiBi biases over a window of frames,
-// exact-GELU feed-forwards and named output heads, in float32. Load reads the
+// Package transformer runs small models over sequences of frames in Go, for
+// inference, in float32: transformers, convolutions over the frames as an image,
+// pre-norm attention blocks with ALiBi biases and exact-GELU feed-forwards, and
+// cell nets, convolutions alone; each into named output heads. Load reads the
 // versioned weight file doc/format.md defines, from any trainer that writes it.
 package transformer
 
@@ -26,7 +26,7 @@ func newLinear(in, out int) linear {
 // apply writes x (frames × In) through the layer into y (frames × Out), a
 // weight row at a time for a block of frames
 func (l *linear) apply(x []float32, frames int, y []float32) {
-	across(frames, func(lo, hi int) {
+	across(frames, frameBlock, func(lo, hi int) {
 		for o := range l.Out {
 			w := l.W[o*l.In : (o+1)*l.In]
 			for t := lo; t < hi; t++ {
@@ -54,18 +54,19 @@ func axpyGeneric(w float32, x, y []float32) {
 	}
 }
 
-// frameBlock is the frames f takes at once: few enough that a slow core's last
-// block barely delays the rest, enough that a weight row read once serves them
+// frameBlock is the frames a transformer's layer takes at once: few enough that a
+// slow core's last block barely delays the rest, enough that a weight row read
+// once serves them
 const frameBlock = 8
 
 // across hands 0 to n-1 in blocks to up to GOMAXPROCS goroutines, each taking
 // the next block as it finishes one, and to none under two blocks. f must write
 // only its block's outputs, so the bits never depend on the split.
-func across(n int, f func(lo, hi int)) {
-	procs := min(runtime.GOMAXPROCS(0), (n+frameBlock-1)/frameBlock)
+func across(n, block int, f func(lo, hi int)) {
+	procs := min(runtime.GOMAXPROCS(0), (n+block-1)/block)
 	if procs < 2 {
-		for lo := 0; lo < n; lo += frameBlock {
-			f(lo, min(lo+frameBlock, n))
+		for lo := 0; lo < n; lo += block {
+			f(lo, min(lo+block, n))
 		}
 		return
 	}
@@ -74,11 +75,11 @@ func across(n int, f func(lo, hi int)) {
 	for range procs {
 		wg.Go(func() {
 			for {
-				lo := int(next.Add(frameBlock)) - frameBlock
+				lo := int(next.Add(int64(block))) - block
 				if lo >= n {
 					return
 				}
-				f(lo, min(lo+frameBlock, n))
+				f(lo, min(lo+block, n))
 			}
 		})
 	}
@@ -144,7 +145,7 @@ type conv struct {
 // f/Pool, the GELU taken before the pool
 func (c *conv) apply(x []float32, frames, f int) []float32 {
 	y := make([]float32, frames*c.Out*f)
-	across(frames, func(lo, hi int) {
+	across(frames, frameBlock, func(lo, hi int) {
 		for t := lo; t < hi; t++ {
 			for o := range c.Out {
 				yo := y[(t*c.Out+o)*f : (t*c.Out+o+1)*f]
@@ -196,13 +197,34 @@ type tower struct {
 	out    linear
 }
 
-// Model is one transformer with its weights
+// Model is one model with its weights
 type Model struct {
-	cfg    Config
-	convs  []conv
-	in     linear
-	towers []tower
-	slopes []float32 // one relative-position slope per head
+	cfg Config
+	net net
+}
+
+// net is a model kind's layers
+type net interface {
+	tensors() []tensor                       // every weight, in the order the file holds them
+	randomize(rng *rand.Rand)                // small random weights, scaled to each layer's inputs
+	forward(frames [][]float32, y []float32) // y: a frame's outputs after another's
+}
+
+const (
+	kindTransformer = iota
+	kindCells
+)
+
+// kinds is what each kind of model brings, indexed by Config.kind: its checks,
+// its layers of zero weights, and its header in the file after the channels
+var kinds = [...]struct {
+	validate func(Config) error
+	build    func(Config) net
+	save     func(put func(...int), cfg Config)
+	load     func(get func() (int, error), cfg *Config) error
+}{
+	kindTransformer: {Config.validateTransformer, newTransformer, saveTransformer, loadTransformer},
+	kindCells:       {Config.validateCells, newCellNet, saveCells, loadCells},
 }
 
 // newModel makes a model of zero weights, the shape Load fills
@@ -210,7 +232,20 @@ func newModel(cfg Config) (*Model, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	m := &Model{cfg: cfg, in: newLinear(cfg.features(), cfg.Dim)}
+	return &Model{cfg: cfg, net: kinds[cfg.kind()].build(cfg)}, nil
+}
+
+// transformerNet is a transformer's layers
+type transformerNet struct {
+	cfg    Config
+	convs  []conv
+	in     linear
+	towers []tower
+	slopes []float32 // one relative-position slope per head
+}
+
+func newTransformer(cfg Config) net {
+	m := &transformerNet{cfg: cfg, in: newLinear(cfg.features(), cfg.Dim)}
 	ch := cfg.channels()
 	for _, cv := range cfg.Convs {
 		m.convs = append(m.convs, conv{Conv: cv, in: ch, W: make([]float32, cv.Out*ch*cv.Time*cv.Freq), B: make([]float32, cv.Out)})
@@ -238,7 +273,7 @@ func newModel(cfg Config) (*Model, error) {
 	for h := range m.slopes {
 		m.slopes[h] = float32(math.Pow(2, -8*float64(h+1)/float64(cfg.Heads)))
 	}
-	return m, nil
+	return m
 }
 
 // NewRandom makes a model of small random weights under seed, for tests and
@@ -248,7 +283,11 @@ func NewRandom(cfg Config, seed uint64) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	rng := rand.New(rand.NewPCG(seed, 0x9e3779b97f4a7c15))
+	m.net.randomize(rand.New(rand.NewPCG(seed, 0x9e3779b97f4a7c15)))
+	return m, nil
+}
+
+func (m *transformerNet) randomize(rng *rand.Rand) {
 	for _, l := range m.linears() {
 		scale := float32(1 / math.Sqrt(float64(l.In)))
 		for i := range l.W {
@@ -261,7 +300,6 @@ func NewRandom(cfg Config, seed uint64) (*Model, error) {
 			c.W[i] = float32(rng.NormFloat64()) * scale
 		}
 	}
-	return m, nil
 }
 
 func (m *Model) Config() Config { return m.cfg }
@@ -269,13 +307,13 @@ func (m *Model) Config() Config { return m.cfg }
 // Parameters counts the weights
 func (m *Model) Parameters() int {
 	n := 0
-	for _, t := range m.tensors() {
+	for _, t := range m.net.tensors() {
 		n += len(t.data)
 	}
 	return n
 }
 
-func (m *Model) linears() []*linear {
+func (m *transformerNet) linears() []*linear {
 	ls := []*linear{&m.in}
 	for ti := range m.towers {
 		tw := &m.towers[ti]
@@ -292,10 +330,21 @@ func (m *Model) linears() []*linear {
 // the model and returns one output vector per frame, the heads laid end to end as
 // Config.Outputs.
 func (m *Model) Forward(frames [][]float32) [][]float32 {
-	T, cfg := len(frames), m.cfg
+	T, size := len(frames), m.cfg.outputSize()
 	if T == 0 {
 		return nil
 	}
+	y := make([]float32, T*size)
+	m.net.forward(frames, y)
+	out := make([][]float32, T)
+	for t := range out {
+		out[t] = y[t*size : (t+1)*size]
+	}
+	return out
+}
+
+func (m *transformerNet) forward(frames [][]float32, y []float32) {
+	T, cfg := len(frames), m.cfg
 	per := cfg.Inputs * cfg.channels()
 	x := make([]float32, T*per)
 	for t, f := range frames {
@@ -311,7 +360,6 @@ func (m *Model) Forward(frames [][]float32) [][]float32 {
 	o := make([]float32, T*cfg.Dim)
 	ff := make([]float32, T*cfg.FFN)
 	size := cfg.outputSize()
-	y := make([]float32, T*size)
 	at := 0 // where this tower's heads begin in a frame's output
 	for ti := range m.towers {
 		tw := &m.towers[ti]
@@ -329,7 +377,7 @@ func (m *Model) Forward(frames [][]float32) [][]float32 {
 			}
 			l.ln2.apply(h, T, n)
 			l.ff1.apply(n, T, ff)
-			across(T, func(lo, hi int) {
+			across(T, frameBlock, func(lo, hi int) {
 				for j := lo * cfg.FFN; j < hi*cfg.FFN; j++ {
 					ff[j] = gelu(ff[j])
 				}
@@ -347,21 +395,16 @@ func (m *Model) Forward(frames [][]float32) [][]float32 {
 		}
 		at += tw.out.Out
 	}
-	out := make([][]float32, T)
-	for t := range out {
-		out[t] = y[t*size : (t+1)*size]
-	}
-	return out
 }
 
 // attend is multi-head attention over the window: each frame weighs the frames
 // within Window of it by their keys' match to its query, less the head's slope
 // per frame of distance, and sums their values.
-func (m *Model) attend(q, k, v []float32, T int, out []float32) {
+func (m *transformerNet) attend(q, k, v []float32, T int, out []float32) {
 	cfg := m.cfg
 	dh := cfg.Dim / cfg.Heads
 	scale := float32(1 / math.Sqrt(float64(dh)))
-	across(T, func(from, to int) {
+	across(T, frameBlock, func(from, to int) {
 		scores := make([]float32, 2*cfg.Window+1)
 		for i := from; i < to; i++ {
 			lo, hi := max(i-cfg.Window, 0), min(i+cfg.Window, T-1)
