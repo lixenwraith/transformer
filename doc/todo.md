@@ -49,18 +49,33 @@ subtracts.
 
 `BenchmarkForward` is the before: a width-256 model of eight heads, four layers,
 a feed-forward of 1024 and a window of 64, over 512 frames of 230 inputs into
-318 outputs, 8.1 MB a call. On a 4-vCPU Intel Xeon container (2.1 GHz, AVX2),
-medians of six:
+318 outputs, 8.1 MB a call. Medians of three to six, one `-cpu` a process:
 
 ```
-                                  one core              four cores
-plain loops, one goroutine        1.31 s    390 frames/s   1.31 s    390 frames/s
-AVX2 kernels, frames over cores   0.258 s  1981 frames/s   0.078 s  6600 frames/s
+                                    1 core                all cores
+4-vCPU Xeon 2.1 GHz, AVX2
+  plain loops, one goroutine        1.31 s    390 frames/s   1.31 s    390 frames/s
+  AVX2 kernels, frames over cores   0.259 s  1977 frames/s   0.074 s  6960 frames/s
+Pixel 8 Pro (Tensor G3), NEON
+  plain loops, one goroutine        1.22 s    421 frames/s
+  NEON kernels, frames over 9 cores 0.247 s  2071 frames/s   0.372 s  1376 frames/s
 ```
 
-A frame is 256 samples at 22050 Hz to the rip, 86 a second of audio: 4.5 times
-real time before, 23 and 77 after. `GOEXPERIMENT=simd`'s package would make
-every importer set the experiment, so the kernels are assembly.
+A frame is 256 samples at 22050 Hz to the rip, 86 a second of audio. A 30 s rip
+with 12a on the Pixel, 2584 frames, takes 2.56 s on one core and 1.07 s on
+nine. `GOEXPERIMENT=simd`'s package would make every importer set the
+experiment, so the kernels are assembly.
+
+### Make a phone's cores beat one at 512 frames
+
+- Priority: P3
+- Affected files: `transformer.go` (`across`, `linear.apply`), `kernel_arm64.s`
+
+On the Pixel the nine cores trail one over `BenchmarkForward`'s 512 frames, and
+four only draw level, though nine win over a clip's 2584. Unmeasured: the
+A510s' share of a layer's blocks, the shared caches the cores' weight reads
+contend for, and the clock a phone holds with every core busy. A kernel keeping
+a weight row in registers across a block's frames cuts the reads again.
 
 ### Run a batch of sequences in one call
 
@@ -72,9 +87,7 @@ goroutines over sequences work today, each reading every weight on its own. A
 batch call over several sequences reads each weight row once for all of them:
 `linear.apply`'s loop over frames becomes one over the batch's frames, and
 `attend` keeps each sequence to itself. A workspace kept across calls would cut
-the allocations. Neither touches the `Config` or the file. Within one sequence
-the same holds: `linear.apply` streams every weight row once a frame, and a
-kernel over four frames a row would read it once for them.
+the allocations. Neither touches the `Config` or the file.
 
 ## Weights
 

@@ -29,7 +29,9 @@ that a document now states, and link the document instead.
   saved file's outputs with main's.
 - `TestKernelsMatchThePlainLoops` runs the NEON kernels under qemu (above); a
   kernel writing past its slice crashes that run in the runtime rather than
-  failing the test. Speed needs a real arm64 device.
+  failing the test. Speed needs a real arm64 device: a `GOOS=linux GOARCH=arm64
+  CGO_ENABLED=0 go test -c` binary runs on Android from `/data/local/tmp` under
+  `adb shell`. A phone heats up over a run; give each `-test.cpu` a fresh start.
 
 ## The float32 check
 
