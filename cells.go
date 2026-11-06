@@ -1,6 +1,7 @@
 package transformer
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"runtime"
@@ -9,10 +10,12 @@ import (
 
 // cellNet is a cell net's layers, each convolution's weights as PyTorch holds them
 type cellNet struct {
-	cfg                                Config
-	reduce, wide, cells, near, cellout conv // out × in × time × freq
-	frame1, frame2                     conv // out × in × time
-	frameout                           linear
+	cfg                 Config
+	reduce, wide, cells conv
+	near                []conv
+	cellout             conv
+	frame1, frame2      conv // over the frames alone, Freq 1
+	frameout            conv // a linear layer, Time and Freq 1
 }
 
 func newCellNet(cfg Config) net {
@@ -20,31 +23,38 @@ func newCellNet(cfg Config) net {
 	k := func(out, in, time, freq int) conv {
 		return conv{Conv: Conv{Out: out, Time: time, Freq: freq, Pool: 1}, in: in, W: make([]float32, out*in*time*freq), B: make([]float32, out)}
 	}
-	return &cellNet{cfg: cfg,
+	n := &cellNet{cfg: cfg,
 		reduce:   k(c.Reduce, cfg.channels(), 1, 1),
 		wide:     k(c.Wide, c.Reduce, c.WideTime, c.WideFreq),
 		cells:    k(c.Cell, c.Wide, c.CellTime, c.CellFreq),
-		near:     k(c.Cell, c.Cell, c.NearTime, c.NearFreq),
-		cellout:  k(c.Heads, c.Cell, 1, 1),
+		cellout:  k(c.channels(cfg.Outputs), c.Cell, 1, 1),
 		frame1:   k(c.Frame, c.pooled(), c.FrameTime, 1),
 		frame2:   k(c.Frame, c.Frame, c.AgainTime, 1),
-		frameout: newLinear(c.Frame, cfg.outputSize()-c.Heads*cfg.Outputs[0].Size),
+		frameout: k(cfg.outputSize()-c.channels(cfg.Outputs)*c.Read, c.Frame, 1, 1),
 	}
+	for range c.Depth {
+		n.near = append(n.near, k(c.Cell, c.Cell, c.NearTime, c.NearFreq))
+	}
+	return n
 }
 
 func (n *cellNet) tensors() []tensor {
-	var ts []tensor
-	for _, l := range []struct {
+	type layer struct {
 		name string
 		c    *conv
 		dims int
-	}{{"reduce", &n.reduce, 4}, {"wide", &n.wide, 4}, {"cells", &n.cells, 4}, {"near", &n.near, 4}, {"cellout", &n.cellout, 4},
-		{"frame1", &n.frame1, 3}, {"frame2", &n.frame2, 3}} {
+	}
+	ls := []layer{{"reduce", &n.reduce, 4}, {"wide", &n.wide, 4}, {"cells", &n.cells, 4}}
+	for i := range n.near {
+		ls = append(ls, layer{fmt.Sprintf("near.%d", i), &n.near[i], 4})
+	}
+	ls = append(ls, layer{"cellout", &n.cellout, 4}, layer{"frame1", &n.frame1, 3}, layer{"frame2", &n.frame2, 3}, layer{"frameout", &n.frameout, 2})
+	var ts []tensor
+	for _, l := range ls {
 		dims := []int{l.c.Out, l.c.in, l.c.Time, l.c.Freq}[:l.dims]
 		ts = append(ts, tensor{l.name + ".weight", dims, l.c.W}, tensor{l.name + ".bias", []int{l.c.Out}, l.c.B})
 	}
-	l := &n.frameout
-	return append(ts, tensor{"frameout.weight", []int{l.Out, l.In}, l.W}, tensor{"frameout.bias", []int{l.Out}, l.B})
+	return ts
 }
 
 func (n *cellNet) randomize(rng *rand.Rand) {
@@ -64,10 +74,29 @@ func (n *cellNet) randomize(rng *rand.Rand) {
 // the blocks come in a multiple of the cores, so the last round keeps them busy
 const cellBlock = 128
 
-// arranged is a cell net's kernels as its passes read them: each output's frame
-// by frame, a frame's features by channel, so a channel-innermost row is one dot
-type arranged struct{ wide, cells, near, frame1, frame2 []float32 }
+// rows is a layer over a block of frames, a frame's row after another's: each
+// row its features from first, each feature's channels together, between pad
+// zero features either side, row 0 the frame base's
+type rows struct {
+	buf            []float32
+	base, first    int
+	feats, ch, pad int
+}
 
+func newRows(frames, first, feats, ch, pad int) *rows {
+	return &rows{buf: make([]float32, frames*(feats+2*pad)*ch), first: first, feats: feats, ch: ch, pad: pad}
+}
+
+func (r *rows) row(t int) []float32 {
+	w := (r.feats + 2*r.pad) * r.ch
+	return r.buf[(t-r.base)*w:][:w]
+}
+
+// from is where feature j's channels start in a row, j counted from feature 0
+func (r *rows) from(j int) int { return (j - r.first + r.pad) * r.ch }
+
+// arranged is a convolution's weights as run reads them: each output's kernel
+// frame by frame, feature by feature, the channels innermost
 func (c *conv) arranged() []float32 {
 	w := make([]float32, len(c.W))
 	for o := range c.Out {
@@ -82,13 +111,46 @@ func (c *conv) arranged() []float32 {
 	return w
 }
 
-// reach is how many frames either side of a block each layer is computed over,
-// what the layers after it read; pads are the zero features either side of a row
+// run writes the convolution of in into out's features at frames from to to,
+// output j centred on input feature stride·j and its frames dil apart, the
+// frames past the sequence's T zero, then res added when given, then the GELU
+// when act; w is arranged, and patch holds a kernel's inputs
+func (c *conv) run(w []float32, in, out, res *rows, from, to, T, stride, dil int, act bool, patch []float32) {
+	span := c.Freq * in.ch
+	p := patch[:c.Time*span]
+	for t := from; t < to; t++ {
+		row := out.row(t)
+		for j := out.first; j < out.first+out.feats; j++ {
+			for dt := range c.Time {
+				seg := p[dt*span:][:span]
+				if tt := t + (dt-c.Time/2)*dil; tt >= 0 && tt < T {
+					copy(seg, in.row(tt)[in.from(stride*j-c.Freq/2):])
+				} else {
+					clear(seg)
+				}
+			}
+			at := row[out.from(j):][:c.Out]
+			for o := range at {
+				v := dot(c.B[o], w[o*len(p):][:len(p)], p)
+				if res != nil {
+					v += res.row(t)[res.from(j)+o]
+				}
+				if act {
+					v = gelu(v)
+				}
+				at[o] = v
+			}
+		}
+	}
+}
+
+// reach is how many frames either side of a block each layer is computed over:
+// what the layers after it read
 type reach struct{ reduced, wide, cells, pooled, frame int }
 
 func (c *Cells) reach() reach {
 	var r reach
-	r.cells = c.NearTime / 2
+	r.cells = c.Depth * (c.NearTime / 2)
 	r.frame = c.Dilation * (c.AgainTime / 2)
 	r.pooled = r.frame + c.FrameTime/2
 	r.wide = max(r.cells+c.CellTime/2, r.pooled)
@@ -96,29 +158,39 @@ func (c *Cells) reach() reach {
 	return r
 }
 
-// cellScratch is a goroutine's layers over a block, each a frame's row after another's
+// cellScratch is a goroutine's layers over a block
 type cellScratch struct {
-	reduced, wide, cells, pooled, frame []float32
-	sum, patch, v                       []float32
+	input, reduced, wide, heads, pooled, frame, again, out *rows
+	cells                                                  [2]*rows // a near convolution reads one and writes the other
+	patch                                                  []float32
 }
 
 func (n *cellNet) scratch(block int) *cellScratch {
 	c, r := n.cfg.Cells, n.cfg.Cells.reach()
-	rows := func(h, width int) []float32 { return make([]float32, (block+2*h)*width) }
+	cells := func() *rows { return newRows(block+2*r.cells, 0, c.cells(), c.Cell, c.NearFreq/2) }
+	patch := 0
+	for _, l := range append([]conv{n.reduce, n.wide, n.cells, n.cellout, n.frame1, n.frame2, n.frameout}, n.near...) {
+		patch = max(patch, l.Time*l.Freq*l.in)
+	}
 	return &cellScratch{
-		reduced: rows(r.reduced, (c.Bins+c.WideFreq/2*2)*c.Reduce),
-		wide:    rows(r.wide, (c.CellFreq/2+c.Bins)*c.Wide),
-		cells:   rows(r.cells, (c.cells()+c.NearFreq/2*2)*c.Cell),
-		pooled:  rows(r.pooled, c.pooled()),
-		frame:   rows(r.frame, c.Frame),
-		sum:     make([]float32, c.Bins),
-		patch:   make([]float32, max(c.CellTime*c.CellFreq*c.Wide, c.NearTime*c.NearFreq*c.Cell)),
-		v:       make([]float32, max(c.Cell, c.Frame)),
+		input:   newRows(block+2*r.reduced, 0, c.Bins, n.cfg.channels(), 0),
+		reduced: newRows(block+2*r.reduced, 0, c.Bins, c.Reduce, c.WideFreq/2),
+		wide:    newRows(block+2*r.wide, 0, c.Bins, c.Wide, c.CellFreq/2),
+		cells:   [2]*rows{cells(), cells()},
+		heads:   newRows(block, c.First, c.Read, n.cellout.Out, 0),
+		pooled:  newRows(block+2*r.pooled, 0, 1, c.pooled(), 0),
+		frame:   newRows(block+2*r.frame, 0, 1, c.Frame, 0),
+		again:   newRows(block, 0, 1, c.Frame, 0),
+		out:     newRows(block, 0, 1, n.frameout.Out, 0),
+		patch:   make([]float32, patch),
 	}
 }
 
 func (n *cellNet) forward(frames [][]float32, y []float32) {
-	w := &arranged{n.wide.arranged(), n.cells.arranged(), n.near.arranged(), n.frame1.arranged(), n.frame2.arranged()}
+	w := map[*conv][]float32{}
+	for _, l := range append([]*conv{&n.reduce, &n.wide, &n.cells, &n.cellout, &n.frame1, &n.frame2, &n.frameout}, n.nears()...) {
+		w[l] = l.arranged()
+	}
 	T, procs := len(frames), runtime.GOMAXPROCS(0)
 	blocks := procs * ((T + procs*cellBlock - 1) / (procs * cellBlock))
 	block := (T + blocks - 1) / blocks
@@ -130,138 +202,80 @@ func (n *cellNet) forward(frames [][]float32, y []float32) {
 	})
 }
 
+func (n *cellNet) nears() []*conv {
+	ls := make([]*conv, len(n.near))
+	for i := range n.near {
+		ls[i] = &n.near[i]
+	}
+	return ls
+}
+
 // block writes frames a to b's outputs into y, each layer over the frames the
-// next reads, the frames past the sequence's ends zero
-func (n *cellNet) block(frames [][]float32, a, b int, w *arranged, s *cellScratch, y []float32) {
+// next reads
+func (n *cellNet) block(frames [][]float32, a, b int, w map[*conv][]float32, s *cellScratch, y []float32) {
 	c, r, T := n.cfg.Cells, n.cfg.Cells.reach(), len(frames)
-	inside := func(t int) bool { return t >= 0 && t < T }
 	over := func(h int) (int, int) { return max(a-h, 0), min(b+h, T) }
-	padW, padC, padN := c.WideFreq/2, c.CellFreq/2, c.NearFreq/2
-	rw, ww, cw, pw := (c.Bins+2*padW)*c.Reduce, (padC+c.Bins)*c.Wide, (c.cells()+2*padN)*c.Cell, c.pooled()
-	row := func(buf []float32, h, width, t int) []float32 { return buf[(t-a+h)*width:][:width] }
-	acc := s.sum
+	for l, h := range map[*rows]int{s.input: r.reduced, s.reduced: r.reduced, s.wide: r.wide, s.cells[0]: r.cells, s.cells[1]: r.cells,
+		s.heads: 0, s.pooled: r.pooled, s.frame: r.frame, s.again: 0, s.out: 0} {
+		l.base = a - h
+	}
 
-	for t, end := over(r.reduced); t < end; t++ {
-		out, x := row(s.reduced, r.reduced, rw, t), frames[t]
-		for o := range c.Reduce {
-			for k := range acc {
-				acc[k] = n.reduce.B[o]
-			}
-			for i := range n.reduce.in {
-				axpy(n.reduce.W[o*n.reduce.in+i], x[i*n.cfg.Inputs:][:c.Bins], acc)
-			}
-			for k, v := range acc {
-				out[(padW+k)*c.Reduce+o] = gelu(v)
+	from, to := over(r.reduced)
+	for t := from; t < to; t++ {
+		row, x := s.input.row(t), frames[t]
+		for i := range s.input.ch {
+			for k, v := range x[i*n.cfg.Inputs:][:c.Bins] {
+				row[k*s.input.ch+i] = v
 			}
 		}
 	}
-
-	span := c.WideFreq * c.Reduce
-	for t, end := over(r.wide); t < end; t++ {
-		out := row(s.wide, r.wide, ww, t)
-		for o := range c.Wide {
-			for k := range acc {
-				acc[k] = n.wide.B[o]
-			}
-			for dt := range c.WideTime {
-				if tt := t + dt - c.WideTime/2; inside(tt) {
-					in, kw := row(s.reduced, r.reduced, rw, tt), w.wide[(o*c.WideTime+dt)*span:][:span]
-					for k := range acc {
-						acc[k] = dot(acc[k], kw, in[k*c.Reduce:][:span])
-					}
-				}
-			}
-			for k, v := range acc {
-				out[(padC+k)*c.Wide+o] = gelu(v)
-			}
-		}
+	n.reduce.run(w[&n.reduce], s.input, s.reduced, nil, from, to, T, 1, 1, true, s.patch)
+	from, to = over(r.wide)
+	n.wide.run(w[&n.wide], s.reduced, s.wide, nil, from, to, T, 1, 1, true, s.patch)
+	from, to = over(r.cells)
+	n.cells.run(w[&n.cells], s.wide, s.cells[0], nil, from, to, T, c.Stride, 1, true, s.patch)
+	for i := range n.near {
+		in, out := s.cells[i%2], s.cells[(i+1)%2]
+		from, to = over(r.cells - (i+1)*(c.NearTime/2))
+		n.near[i].run(w[&n.near[i]], in, out, in, from, to, T, 1, 1, true, s.patch)
 	}
+	n.cellout.run(w[&n.cellout], s.cells[len(n.near)%2], s.heads, nil, a, b, T, 1, 1, false, s.patch)
 
-	span = c.CellFreq * c.Wide
-	for t, end := over(r.cells); t < end; t++ {
-		out, p := row(s.cells, r.cells, cw, t), s.patch[:c.CellTime*span]
-		for j := range c.cells() {
-			for dt := range c.CellTime {
-				seg := p[dt*span:][:span]
-				if tt := t + dt - c.CellTime/2; inside(tt) {
-					copy(seg, row(s.wide, r.wide, ww, tt)[c.Stride*j*c.Wide:])
-				} else {
-					clear(seg)
-				}
-			}
-			for o := range c.Cell {
-				out[(padN+j)*c.Cell+o] = gelu(dot(n.cells.B[o], w.cells[o*len(p):][:len(p)], p))
-			}
-		}
-	}
-
-	size, read := n.cfg.outputSize(), n.cfg.Outputs[0].Size
-	span = c.NearFreq * c.Cell
-	for t := a; t < b; t++ {
-		at, p, v := row(s.cells, r.cells, cw, t), s.patch[:c.NearTime*span], s.v[:c.Cell]
-		for j := c.First; j < c.First+read; j++ {
-			for dt := range c.NearTime {
-				seg := p[dt*span:][:span]
-				if tt := t + dt - c.NearTime/2; inside(tt) {
-					copy(seg, row(s.cells, r.cells, cw, tt)[j*c.Cell:])
-				} else {
-					clear(seg)
-				}
-			}
-			for o := range c.Cell {
-				v[o] = gelu(dot(n.near.B[o], w.near[o*len(p):][:len(p)], p) + at[(padN+j)*c.Cell+o])
-			}
-			for h := range c.Heads {
-				y[t*size+h*read+j-c.First] = dot(n.cellout.B[h], n.cellout.W[h*c.Cell:][:c.Cell], v)
-			}
-		}
-	}
-
-	for t, end := over(r.pooled); t < end; t++ {
-		out, in := row(s.pooled, r.pooled, pw, t), row(s.wide, r.wide, ww, t)[padC*c.Wide:]
+	from, to = over(r.pooled)
+	for t := from; t < to; t++ {
+		in, out := s.wide.row(t)[s.wide.from(0):], s.pooled.row(t)
 		for ch := range c.Wide {
 			for g := range c.Regions {
-				from, to := g*c.Bins/c.Regions, ((g+1)*c.Bins+c.Regions-1)/c.Regions
+				lo, hi := g*c.Bins/c.Regions, ((g+1)*c.Bins+c.Regions-1)/c.Regions
 				var sum float32
-				for k := from; k < to; k++ {
+				for k := lo; k < hi; k++ {
 					sum += in[k*c.Wide+ch]
 				}
-				out[ch*c.Regions+g] = sum / float32(to-from)
+				out[ch*c.Regions+g] = sum / float32(hi-lo)
 			}
 		}
 		for i, sc := range c.Scalars {
 			out[c.Wide*c.Regions+i] = frames[t][sc]
 		}
 	}
+	from, to = over(r.frame)
+	n.frame1.run(w[&n.frame1], s.pooled, s.frame, nil, from, to, T, 1, 1, true, s.patch)
+	n.frame2.run(w[&n.frame2], s.frame, s.again, s.frame, a, b, T, 1, c.Dilation, true, s.patch)
+	n.frameout.run(w[&n.frameout], s.again, s.out, nil, a, b, T, 1, 1, false, s.patch)
 
-	for t, end := over(r.frame); t < end; t++ {
-		out := row(s.frame, r.frame, c.Frame, t)
-		for o := range c.Frame {
-			v := n.frame1.B[o]
-			for dt := range c.FrameTime {
-				if tt := t + dt - c.FrameTime/2; inside(tt) {
-					v = dot(v, w.frame1[(o*c.FrameTime+dt)*pw:][:pw], row(s.pooled, r.pooled, pw, tt))
+	size, at, ch := n.cfg.outputSize(), 0, 0
+	for _, h := range n.cfg.Outputs[:c.Heads] {
+		for t := a; t < b; t++ {
+			row, yt := s.heads.row(t), y[t*size+at:][:h.Size]
+			for k := range h.Size / c.Read {
+				for j := range c.Read {
+					yt[k*c.Read+j] = row[j*s.heads.ch+ch+k]
 				}
 			}
-			out[o] = gelu(v)
 		}
+		at, ch = at+h.Size, ch+h.Size/c.Read
 	}
-
-	at := c.Heads * read
 	for t := a; t < b; t++ {
-		v, in := s.v[:c.Frame], row(s.frame, r.frame, c.Frame, t)
-		for o := range c.Frame {
-			u := n.frame2.B[o]
-			for dt := range c.AgainTime {
-				if tt := t + (dt-c.AgainTime/2)*c.Dilation; inside(tt) {
-					u = dot(u, w.frame2[(o*c.AgainTime+dt)*c.Frame:][:c.Frame], row(s.frame, r.frame, c.Frame, tt))
-				}
-			}
-			v[o] = gelu(u + in[o])
-		}
-		l := &n.frameout
-		for o := range l.Out {
-			y[t*size+at+o] = dot(l.B[o], l.W[o*l.In:][:l.In], v)
-		}
+		copy(y[t*size+at:], s.out.row(t))
 	}
 }

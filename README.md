@@ -16,7 +16,8 @@ its weight file ([doc/format.md](doc/format.md)).
   - `config.go`: the shape (`Config`, `Head`, `Conv`, `Tower`) and its checks;
   - `transformer.go`: the layers, `Model`, the kinds of model, `NewRandom` and
     `Forward`;
-  - `cells.go`: the cell net's layers and its pass over a sequence in blocks;
+  - `cells.go`: the cell net's layers, its pass over a sequence in blocks, and
+    the convolution over a block's rows it runs each layer with;
   - `kernel_*.go`, `kernel_*.s`: the inner products, on AVX2 and FMA on amd64
     when the CPU has them, NEON on arm64, and the plain loops elsewhere;
   - `weights.go`: the weight file, `Save` and `Load`.
@@ -57,8 +58,9 @@ type Cells struct { // a cell net's sizes, doc/format.md's header in its order
     Bins, Reduce                    int
     Wide, WideTime, WideFreq        int
     Cell, CellTime, CellFreq        int
-    Stride, NearTime, NearFreq      int
-    First, Heads, Regions           int
+    Stride                          int
+    Depth, NearTime, NearFreq       int
+    First, Read, Heads, Regions     int
     Scalars                         []int
     Frame, FrameTime                int
     AgainTime, Dilation             int
@@ -98,8 +100,9 @@ func (m *Model) Parameters() int
 
 A **cell net** (`Config.Cells`) reads the same frames as an image and has no
 attention: a 1×1 convolution and a wide one over the features, one to cells a
-`Stride` of features apart, and one over the cells added back, all GELU, give
-each cell its heads through a 1×1 convolution, the same weights at every cell;
+`Stride` of features apart, and `Depth` over the cells each added back, all GELU,
+give each cell its heads through a 1×1 convolution, the same weights at every
+cell, a head of several channels laying one channel's cells after another's;
 the frame's heads come from the wide channels averaged to `Regions`, the
 `Scalars` beside them, through two convolutions over the frames and a linear
 layer. Its output is the cell heads, each its cells in order, then the frame

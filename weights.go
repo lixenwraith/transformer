@@ -275,7 +275,7 @@ func loadTransformer(get func() (int, error), c *Config) error {
 // sizes are a cell net's sizes in the order the file holds them, Scalars after
 func (c *Cells) sizes() []*int {
 	return []*int{&c.Bins, &c.Reduce, &c.Wide, &c.WideTime, &c.WideFreq, &c.Cell, &c.CellTime, &c.CellFreq, &c.Stride,
-		&c.NearTime, &c.NearFreq, &c.First, &c.Heads, &c.Regions, &c.Frame, &c.FrameTime, &c.AgainTime, &c.Dilation}
+		&c.Depth, &c.NearTime, &c.NearFreq, &c.First, &c.Read, &c.Heads, &c.Regions, &c.Frame, &c.FrameTime, &c.AgainTime, &c.Dilation}
 }
 
 // maxScalars bounds a cell net's scalars before its Config is checked

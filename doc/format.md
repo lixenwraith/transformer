@@ -53,8 +53,10 @@ reduce     u32         channels of the 1×1 convolution
 wide       u32 × 3     channels, frames, features of the wide convolution
 cell       u32 × 3     channels, frames, features of the convolution to cells
 stride     u32         bins from one cell to the next
-near       u32 × 2     frames, features of the convolution over the cells
+depth      u32         convolutions over the cells in turn, 0 or more
+near       u32 × 2     frames, features of each of them
 first      u32         the first cell the cell heads read
+read       u32         how many cells they read
 heads      u32         the output heads, from the first, that are per cell
 regions    u32         runs of bins each wide channel averages to
 frame      u32 × 2     channels, frames of the frame path's first convolution
@@ -122,10 +124,10 @@ wide.weight        wide × reduce × wide frames × wide features
 wide.bias          wide
 cells.weight       cell × wide × cell frames × cell features
 cells.bias         cell
-near.weight        cell × cell × near frames × near features
-near.bias          cell
-cellout.weight     heads × cell × 1 × 1
-cellout.bias       heads
+near.{d}.weight    cell × cell × near frames × near features      d from 0 to depth − 1
+near.{d}.bias      cell
+cellout.weight     out × cell × 1 × 1                            out: the cell heads' sizes over read, summed
+cellout.bias       out
 frame1.weight      frame × (wide·regions + nscalars) × frame frames
 frame1.bias        frame
 frame2.weight      frame × frame × again frames
@@ -176,10 +178,10 @@ kernel centred on each frame, zero past the sequence's ends:
 2. `cells` makes cell j from the bins `cell features` wide centred on bin
    stride·j, those before bin 0 zero, for each j whose last bin is a bin:
    (bins + ⌊cell features/2⌋ − cell features) / stride + 1 cells, rounded down,
-   then the GELU. `near` runs over the cells, zero past them, and adds the cells
-   back before its GELU; the 1×1 `cellout` makes channel h of it cell head h,
-   its cells from `first` on, as many as a cell head's size. Every cell head has
-   that size.
+   then the GELU. Each `near` in turn runs over the cells, zero past them, and
+   adds its input back before its GELU. The 1×1 `cellout` makes the cell heads'
+   channels at cells `first` to `first + read`: a cell head of size k·read takes
+   the next k channels, each channel's `read` cells after the one before.
 3. The frame path averages each `wide` channel over `regions` runs of the bins,
    run g from bin ⌊g·bins/regions⌋ to before ⌈(g+1)·bins/regions⌉ (PyTorch's
    `adaptive_avg_pool2d`), channel by channel, then the scalars as they are.
@@ -203,9 +205,10 @@ with a PyTorch model in float32 to rounding ([agent notes](agent-notes.md)).
 - it has at most 16 convolutions, at most 16 towers and 1 to 64 output heads;
 - each convolution has `out` and `pool` of 1 or more and odd `time` and `freq`;
 - each tower computes 1 or more heads and, with towers, theirs sum to `nheads`;
-- a cell net has every count 1 or more, odd kernels, at most `inputs` bins and
-  a cell of them, a frame head besides its cell heads, its cell heads of one
-  size within the cells from `first`, and each scalar within a frame;
+- a cell net has every count 1 or more but `depth`, odd kernels, at most
+  `inputs` bins and a cell of them, a frame head besides its cell heads, `read`
+  cells from `first` within the cells, each cell head a multiple of `read`,
+  and each scalar within a frame;
 - `inputs`, `channels`, `features`, `dim`, `heads` and `ffn` are 1 or more, and
   `dim` a multiple of `heads`;
 - the output heads' names are 1 to 64 bytes and distinct, and each size is 1 or

@@ -45,22 +45,23 @@ type Config struct {
 }
 
 // Cells is a convolutional net over the frames as an image, the same weights at
-// every cell along the features: the first Heads outputs are per cell, each read
-// from around its cell, and the rest per frame, from the features pooled to
-// regions and the Scalars. doc/format.md states each step; every count is one or
-// more, every kernel odd.
+// every cell along the features: the first Heads outputs are per cell, each Read
+// cells times its channels, read from around its cell, and the rest per frame,
+// from the features pooled to regions and the Scalars. doc/format.md states each
+// step; every count but Depth is one or more, every kernel odd.
 type Cells struct {
-	Bins                     int // features of each channel the convolutions read, from its first
-	Reduce                   int // channels of the 1×1 convolution over the input's
-	Wide, WideTime, WideFreq int // channels and kernel of the convolution over the bins
-	Cell, CellTime, CellFreq int // of the convolution to cells, cell j centred on bin Stride·j
-	Stride                   int
-	NearTime, NearFreq       int   // kernel of the convolution over the cells, added back
-	First, Heads             int   // the first cell the cell heads read, and how many heads are per cell
-	Regions                  int   // runs of bins each wide channel averages to for the frame path
-	Scalars                  []int // inputs of a frame, across its channels, the frame path reads as they are
-	Frame, FrameTime         int   // channels and frames of the frame path's convolution,
-	AgainTime, Dilation      int   // then its second's frames, Dilation apart, added back
+	Bins                      int // features of each channel the convolutions read, from its first
+	Reduce                    int // channels of the 1×1 convolution over the input's
+	Wide, WideTime, WideFreq  int // channels and kernel of the convolution over the bins
+	Cell, CellTime, CellFreq  int // of the convolution to cells, cell j centred on bin Stride·j
+	Stride                    int
+	Depth, NearTime, NearFreq int   // convolutions over the cells in turn, each added back, and their kernel
+	First, Read               int   // the first cell the cell heads read, and how many
+	Heads                     int   // how many of Outputs, from the first, are per cell
+	Regions                   int   // runs of bins each wide channel averages to for the frame path
+	Scalars                   []int // inputs of a frame, across its channels, the frame path reads as they are
+	Frame, FrameTime          int   // channels and frames of the frame path's convolution,
+	AgainTime, Dilation       int   // then its second's frames, Dilation apart, added back
 }
 
 // cells is how many cells the convolution to cells makes of the bins
@@ -68,6 +69,15 @@ func (c *Cells) cells() int { return (c.Bins+c.CellFreq/2-c.CellFreq)/c.Stride +
 
 // pooled is what the frame path's first convolution reads a frame as
 func (c *Cells) pooled() int { return c.Wide*c.Regions + len(c.Scalars) }
+
+// channels is the cell heads' channels at each cell, their sizes over Read
+func (c *Cells) channels(heads []Head) int {
+	n := 0
+	for _, h := range heads[:c.Heads] {
+		n += h.Size / c.Read
+	}
+	return n
+}
 
 // validateCells checks the sizes of a cell net
 func (c Config) validateCells() error {
@@ -83,7 +93,7 @@ func (c Config) validateCells() error {
 	switch {
 	case len(c.Convs) > 0 || c.Dim != 0 || c.Heads != 0 || c.Layers != 0 || c.FFN != 0 || c.Window != 0 || len(c.Towers) > 0:
 		return errors.New("transformer: a cell net takes no transformer sizes")
-	case n.Bins < 1 || n.Bins > c.Inputs || n.Reduce < 1 || n.Wide < 1 || n.Cell < 1 || n.Stride < 1 || n.Regions < 1 || n.Frame < 1 || n.Dilation < 1:
+	case n.Bins < 1 || n.Bins > c.Inputs || n.Reduce < 1 || n.Wide < 1 || n.Cell < 1 || n.Stride < 1 || n.Depth < 0 || n.Read < 1 || n.Regions < 1 || n.Frame < 1 || n.Dilation < 1:
 		return fmt.Errorf("transformer: cell net %+v: a count under one, or more bins than inputs", *n)
 	case !odd(n.WideTime, n.WideFreq, n.CellTime, n.CellFreq, n.NearTime, n.NearFreq, n.FrameTime, n.AgainTime):
 		return errors.New("transformer: a cell net's kernel is not odd")
@@ -92,9 +102,12 @@ func (c Config) validateCells() error {
 	case n.Heads < 1 || n.Heads >= len(c.Outputs):
 		return fmt.Errorf("transformer: %d cell heads of %d, want a frame head too", n.Heads, len(c.Outputs))
 	}
+	if n.First < 0 || n.First+n.Read > n.cells() {
+		return fmt.Errorf("transformer: the cell heads read %d cells from %d of %d", n.Read, n.First, n.cells())
+	}
 	for _, h := range c.Outputs[:n.Heads] {
-		if size := c.Outputs[0].Size; h.Size != size || size < 1 || n.First < 0 || n.First+size > n.cells() {
-			return fmt.Errorf("transformer: cell head %q reads %d cells from %d of %d", h.Name, h.Size, n.First, n.cells())
+		if h.Size < 1 || h.Size%n.Read != 0 {
+			return fmt.Errorf("transformer: cell head %q of %d is no multiple of %d cells", h.Name, h.Size, n.Read)
 		}
 	}
 	for _, s := range n.Scalars {

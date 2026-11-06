@@ -84,9 +84,12 @@ Medians of three to five, one `-cpu` a process:
 
 On one core the profile gives the GELU 37% (its float64 `math.Erf`, eleven
 thousand a frame), `dot` 50% and the rest the loops. `dot` reads two floats a
-multiply, so a kernel of two weight rows against four patches, which shares its
-loads, would near double it; an `erfc` of float32 accuracy over one `math.Exp`
-would halve the GELU, which moves a transformer's bits within rounding too.
+multiply, so a kernel of four weight rows against one or two patches, which
+shares its loads, would near double it: `conv.run` dots every output channel
+against one patch. A scalar GELU over Numerical Recipes' `erfc` and a polynomial
+`exp` measured 21 ns against `math.Erf`'s 35, within 1.8e-7, about 1.2 times the
+pass, and would move a transformer's bits too; a GELU over a row in the vector
+kernels is the larger step.
 
 ### Make a phone's cores beat one at 512 frames
 

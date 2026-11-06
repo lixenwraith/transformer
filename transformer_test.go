@@ -14,11 +14,12 @@ func tiny() Config {
 		Outputs: []Head{{"a", 3}, {"b", 2}}}
 }
 
-// tinyCells is a cell net of every part, three channels of 21 inputs, seven cells
+// tinyCells is a cell net of every part, three channels of 21 inputs, seven
+// cells, two convolutions over them and a cell head of two channels
 func tinyCells() Config {
-	return Config{Inputs: 21, Channels: 3, Outputs: []Head{{"c1", 5}, {"c2", 5}, {"f", 3}}, Cells: &Cells{
-		Bins: 20, Reduce: 2, Wide: 3, WideTime: 3, WideFreq: 5, Cell: 4, CellTime: 3, CellFreq: 3, Stride: 3, NearTime: 3, NearFreq: 3,
-		First: 1, Heads: 2, Regions: 4, Scalars: []int{20, 62}, Frame: 5, FrameTime: 3, AgainTime: 3, Dilation: 2}}
+	return Config{Inputs: 21, Channels: 3, Outputs: []Head{{"c1", 5}, {"c2", 10}, {"f", 3}}, Cells: &Cells{
+		Bins: 20, Reduce: 2, Wide: 3, WideTime: 3, WideFreq: 5, Cell: 4, CellTime: 3, CellFreq: 3, Stride: 3, Depth: 2, NearTime: 3, NearFreq: 3,
+		First: 1, Read: 5, Heads: 2, Regions: 4, Scalars: []int{20, 62}, Frame: 5, FrameTime: 3, AgainTime: 3, Dilation: 2}}
 }
 
 func frames(T, n int, seed uint64) [][]float32 {
@@ -222,7 +223,8 @@ func TestConvolutionMatchesItsDefinition(t *testing.T) {
 
 // TestCellNetMatchesItsDefinition: each output is the cell net's layers as
 // format.md states them, run in float64 over the whole sequence as PyTorch pads
-// it, though Forward runs it in blocks over cores, its biases not zero.
+// it, though Forward runs it in blocks over cores, its biases not zero, a cell
+// head of two channels laid one channel's cells after the other's.
 func TestCellNetMatchesItsDefinition(t *testing.T) {
 	cfg := tinyCells()
 	m, _ := NewRandom(cfg, 5)
@@ -286,8 +288,10 @@ func TestCellNetMatchesItsDefinition(t *testing.T) {
 	reduced := g(conv(x, &n.reduce, 0, 0, 1, 1, c.Bins), nil)
 	wide := g(conv(reduced, &n.wide, c.WideTime/2, c.WideFreq/2, 1, 1, c.Bins), nil)
 	cells := g(conv(wide, &n.cells, c.CellTime/2, c.CellFreq/2, c.Stride, 1, c.cells()), nil)
-	near := g(conv(cells, &n.near, c.NearTime/2, c.NearFreq/2, 1, 1, c.cells()), cells)
-	heads := conv(near, &n.cellout, 0, 0, 1, 1, c.cells())
+	for i := range n.near {
+		cells = g(conv(cells, &n.near[i], c.NearTime/2, c.NearFreq/2, 1, 1, c.cells()), cells)
+	}
+	heads := conv(cells, &n.cellout, 0, 0, 1, 1, c.cells())
 	pooled := make([][][]float64, c.pooled())
 	for i := range pooled {
 		pooled[i] = make([][]float64, T)
@@ -307,11 +311,10 @@ func TestCellNetMatchesItsDefinition(t *testing.T) {
 	}
 	f1 := g(conv(pooled, &n.frame1, c.FrameTime/2, 0, 1, 1, 1), nil)
 	f2 := g(conv(f1, &n.frame2, c.Dilation*(c.AgainTime/2), 0, 1, c.Dilation, 1), f1)
-	read := cfg.Outputs[0].Size
 	for tt := range T {
 		want := make([]float64, 0, cfg.outputSize())
-		for h := range c.Heads {
-			want = append(want, heads[h][tt][c.First:c.First+read]...)
+		for ch := range n.cellout.Out {
+			want = append(want, heads[ch][tt][c.First:c.First+c.Read]...)
 		}
 		for o := range n.frameout.Out {
 			s := float64(n.frameout.B[o])
@@ -433,8 +436,8 @@ func BenchmarkKernels(b *testing.B) {
 func BenchmarkCellNet(b *testing.B) {
 	const T = 512
 	cfg := Config{Inputs: 214, Channels: 16, Outputs: []Head{{"pitch", 69}, {"strike", 69}, {"release", 69}, {"velocity", 69}, {"frame", 42}}, Cells: &Cells{
-		Bins: 213, Reduce: 8, Wide: 16, WideTime: 3, WideFreq: 39, Cell: 32, CellTime: 7, CellFreq: 3, Stride: 3, NearTime: 7, NearFreq: 3,
-		First: 1, Heads: 4, Regions: 16, Scalars: []int{213, 1925}, Frame: 64, FrameTime: 5, AgainTime: 9, Dilation: 2}}
+		Bins: 213, Reduce: 8, Wide: 16, WideTime: 3, WideFreq: 39, Cell: 32, CellTime: 7, CellFreq: 3, Stride: 3, Depth: 1, NearTime: 7, NearFreq: 3,
+		First: 1, Read: 69, Heads: 4, Regions: 16, Scalars: []int{213, 1925}, Frame: 64, FrameTime: 5, AgainTime: 9, Dilation: 2}}
 	m, err := NewRandom(cfg, 1)
 	if err != nil {
 		b.Fatal(err)
