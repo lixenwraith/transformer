@@ -1,5 +1,5 @@
 // Package transformer runs small transformer models over sequences of frames in
-// pure Go, for inference: convolutions over the frames as an image, a linear
+// Go, for inference: convolutions over the frames as an image, a linear
 // input, pre-norm attention blocks with ALiBi biases over a window of frames,
 // exact-GELU feed-forwards and named output heads, in float32. Load reads the
 // versioned weight file doc/format.md defines, from any trainer that writes it.
@@ -8,6 +8,9 @@ package transformer
 import (
 	"math"
 	"math/rand/v2"
+	"runtime"
+	"sync"
+	"sync/atomic"
 )
 
 // linear is y = W x + b, W held as Out rows of In
@@ -22,17 +25,58 @@ func newLinear(in, out int) linear {
 
 // apply writes x (frames × In) through the layer into y (frames × Out)
 func (l *linear) apply(x []float32, frames int, y []float32) {
-	for t := range frames {
-		xt, yt := x[t*l.In:(t+1)*l.In], y[t*l.Out:(t+1)*l.Out]
-		for o := range l.Out {
-			w := l.W[o*l.In : (o+1)*l.In]
-			s := l.B[o]
-			for i, v := range xt {
-				s += w[i] * v
+	across(frames, func(lo, hi int) {
+		for t := lo; t < hi; t++ {
+			xt, yt := x[t*l.In:(t+1)*l.In], y[t*l.Out:(t+1)*l.Out]
+			for o := range l.Out {
+				yt[o] = dot(l.B[o], l.W[o*l.In:(o+1)*l.In], xt)
 			}
-			yt[o] = s
 		}
+	})
+}
+
+// dotGeneric is s plus a·b summed in order, the reference the vector kernels
+// match to float32 rounding and the dot of a target without them
+func dotGeneric(s float32, a, b []float32) float32 {
+	b = b[:len(a)]
+	for i, v := range a {
+		s += v * b[i]
 	}
+	return s
+}
+
+// axpyGeneric adds w·x into y, as axpy does on a target without vector kernels
+func axpyGeneric(w float32, x, y []float32) {
+	y = y[:len(x)]
+	for i, v := range x {
+		y[i] += w * v
+	}
+}
+
+// across hands 0 to n-1 in chunks to GOMAXPROCS goroutines, each taking the
+// next chunk as it finishes one. f must write only its chunk's outputs, so the
+// bits never depend on the split.
+func across(n int, f func(lo, hi int)) {
+	procs := min(runtime.GOMAXPROCS(0), n)
+	if procs < 2 {
+		f(0, n)
+		return
+	}
+	chunk := max(n/(procs*4), 1)
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range procs {
+		wg.Go(func() {
+			for {
+				lo := int(next.Add(int64(chunk))) - chunk
+				if lo >= n {
+					return
+				}
+				f(lo, min(lo+chunk, n))
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // layerNorm normalizes each frame over the width, then scales and shifts it
@@ -94,32 +138,34 @@ type conv struct {
 // f/Pool, the GELU taken before the pool
 func (c *conv) apply(x []float32, frames, f int) []float32 {
 	y := make([]float32, frames*c.Out*f)
-	for t := range frames {
-		for o := range c.Out {
-			yo := y[(t*c.Out+o)*f : (t*c.Out+o+1)*f]
-			for k := range yo {
-				yo[k] = c.B[o]
-			}
-			for i := range c.in {
-				for dt := range c.Time {
-					tt := t + dt - c.Time/2
-					if tt < 0 || tt >= frames {
-						continue
-					}
-					xi := x[(tt*c.in+i)*f : (tt*c.in+i+1)*f]
-					for dk := range c.Freq {
-						w, d := c.W[((o*c.in+i)*c.Time+dt)*c.Freq+dk], dk-c.Freq/2
-						for k := max(-d, 0); k < min(f, f-d); k++ {
-							yo[k] += w * xi[k+d]
+	across(frames, func(lo, hi int) {
+		for t := lo; t < hi; t++ {
+			for o := range c.Out {
+				yo := y[(t*c.Out+o)*f : (t*c.Out+o+1)*f]
+				for k := range yo {
+					yo[k] = c.B[o]
+				}
+				for i := range c.in {
+					for dt := range c.Time {
+						tt := t + dt - c.Time/2
+						if tt < 0 || tt >= frames {
+							continue
+						}
+						xi := x[(tt*c.in+i)*f : (tt*c.in+i+1)*f]
+						for dk := range c.Freq {
+							w, d := c.W[((o*c.in+i)*c.Time+dt)*c.Freq+dk], dk-c.Freq/2
+							if from, to := max(-d, 0), min(f, f-d); from < to {
+								axpy(w, xi[from+d:to+d], yo[from:to])
+							}
 						}
 					}
 				}
-			}
-			for k := range yo {
-				yo[k] = gelu(yo[k])
+				for k := range yo {
+					yo[k] = gelu(yo[k])
+				}
 			}
 		}
-	}
+	})
 	if c.Pool == 1 {
 		return y
 	}
@@ -277,9 +323,11 @@ func (m *Model) Forward(frames [][]float32) [][]float32 {
 			}
 			l.ln2.apply(h, T, n)
 			l.ff1.apply(n, T, ff)
-			for j := range ff {
-				ff[j] = gelu(ff[j])
-			}
+			across(T, func(lo, hi int) {
+				for j := lo * cfg.FFN; j < hi*cfg.FFN; j++ {
+					ff[j] = gelu(ff[j])
+				}
+			})
 			l.ff2.apply(ff, T, o)
 			for j := range h {
 				h[j] += o[j]
@@ -307,44 +355,38 @@ func (m *Model) attend(q, k, v []float32, T int, out []float32) {
 	cfg := m.cfg
 	dh := cfg.Dim / cfg.Heads
 	scale := float32(1 / math.Sqrt(float64(dh)))
-	scores := make([]float32, 2*cfg.Window+1)
-	for h := range cfg.Heads {
-		off := h * dh
-		for i := range T {
+	across(T, func(from, to int) {
+		scores := make([]float32, 2*cfg.Window+1)
+		for i := from; i < to; i++ {
 			lo, hi := max(i-cfg.Window, 0), min(i+cfg.Window, T-1)
-			qi := q[i*cfg.Dim+off : i*cfg.Dim+off+dh]
-			var peak float32 = -math.MaxFloat32
-			for j := lo; j <= hi; j++ {
-				kj := k[j*cfg.Dim+off : j*cfg.Dim+off+dh]
-				var s float32
-				for d := range dh {
-					s += qi[d] * kj[d]
+			for h := range cfg.Heads {
+				off := h * dh
+				qi := q[i*cfg.Dim+off : i*cfg.Dim+off+dh]
+				var peak float32 = -math.MaxFloat32
+				for j := lo; j <= hi; j++ {
+					s := dot(0, qi, k[j*cfg.Dim+off:j*cfg.Dim+off+dh])
+					d := i - j
+					if d < 0 {
+						d = -d
+					}
+					s = s*scale - m.slopes[h]*float32(d)
+					scores[j-lo] = s
+					peak = max(peak, s)
 				}
-				d := i - j
-				if d < 0 {
-					d = -d
+				var sum float32
+				for j := lo; j <= hi; j++ {
+					e := float32(math.Exp(float64(scores[j-lo] - peak)))
+					scores[j-lo] = e
+					sum += e
 				}
-				s = s*scale - m.slopes[h]*float32(d)
-				scores[j-lo] = s
-				peak = max(peak, s)
-			}
-			var sum float32
-			for j := lo; j <= hi; j++ {
-				e := float32(math.Exp(float64(scores[j-lo] - peak)))
-				scores[j-lo] = e
-				sum += e
-			}
-			oi := out[i*cfg.Dim+off : i*cfg.Dim+off+dh]
-			clear(oi)
-			for j := lo; j <= hi; j++ {
-				w := scores[j-lo] / sum
-				vj := v[j*cfg.Dim+off : j*cfg.Dim+off+dh]
-				for d := range dh {
-					oi[d] += w * vj[d]
+				oi := out[i*cfg.Dim+off : i*cfg.Dim+off+dh]
+				clear(oi)
+				for j := lo; j <= hi; j++ {
+					axpy(scores[j-lo]/sum, v[j*cfg.Dim+off:j*cfg.Dim+off+dh], oi)
 				}
 			}
 		}
-	}
+	})
 }
 
 // Slice is the part of a Forward output that one head wrote, nil for a head

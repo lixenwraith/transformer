@@ -49,22 +49,18 @@ subtracts.
 
 `BenchmarkForward` is the before: a width-256 model of eight heads, four layers,
 a feed-forward of 1024 and a window of 64, over 512 frames of 230 inputs into
-318 outputs, takes 0.96 s and 8.1 MB in 17 allocations a call, 531 frames a
-second, on one core of a 4-vCPU Intel Xeon container.
+318 outputs, 8.1 MB a call. On a 4-vCPU Intel Xeon container (2.1 GHz, AVX2),
+medians of six:
 
-### Run the inner products on SIMD
+```
+                                  one core              four cores
+plain loops, one goroutine        1.31 s    390 frames/s   1.31 s    390 frames/s
+AVX2 kernels, frames over cores   0.258 s  1981 frames/s   0.078 s  6600 frames/s
+```
 
-- Priority: P3
-- Affected files: `transformer.go` (`linear.apply`, `attend`, `conv.apply`)
-
-Nearly all the time is the inner products: `linear.apply`'s rows, `attend`'s
-q·k and weighted sums of values, and `conv.apply`'s kernel. Build-tagged
-versions per architecture (amd64, arm64), or `GOEXPERIMENT=simd`'s package,
-take them, with the scalar loops kept as the reference and the fallback the
-`GOARCH=386` and `js/wasm` builds use. No `Config` or file change. A vector sum
-adds in another order, so its outputs move within float32 rounding: the float32
-check against a trainer ([agent notes](agent-notes.md)) gates it, not bit
-equality.
+A frame is 256 samples at 22050 Hz to the rip, 86 a second of audio: 4.5 times
+real time before, 23 and 77 after. `GOEXPERIMENT=simd`'s package would make
+every importer set the experiment, so the kernels are assembly.
 
 ### Run a batch of sequences in one call
 
@@ -76,9 +72,9 @@ goroutines over sequences work today, each reading every weight on its own. A
 batch call over several sequences reads each weight row once for all of them:
 `linear.apply`'s loop over frames becomes one over the batch's frames, and
 `attend` keeps each sequence to itself. A workspace kept across calls would cut
-the allocations. Neither touches the `Config` or the file. `Forward` is one
-goroutine; splitting `attend`'s heads and `linear.apply`'s rows over cores is
-the same seam.
+the allocations. Neither touches the `Config` or the file. Within one sequence
+the same holds: `linear.apply` streams every weight row once a frame, and a
+kernel over four frames a row would read it once for them.
 
 ## Weights
 

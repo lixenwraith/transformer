@@ -13,6 +13,8 @@ comes from any trainer that writes its weight file ([doc/format.md](doc/format.m
 - `transformer`, standard library only, is the whole module:
   - `config.go`: the shape (`Config`, `Head`, `Conv`, `Tower`) and its checks;
   - `transformer.go`: the layers, `Model`, `NewRandom` and `Forward`;
+  - `kernel_*.go`, `kernel_*.s`: the inner products, on AVX2 and FMA on amd64
+    when the CPU has them, NEON on arm64, and the plain loops elsewhere;
   - `weights.go`: the weight file, `Save` and `Load`.
 - [doc/format.md](doc/format.md): the weight file's contract, enough for a
   trainer in any language to write one.
@@ -150,10 +152,11 @@ func main() {
 - `Save` then `Load` gives a model of the same `Config` whose outputs are
   bit-identical to the saved one's (`TestWeightFileRoundTrips`).
 - `Forward` is deterministic: one model and one sequence give bit-identical
-  outputs on one platform and instruction set.
+  outputs on one platform and instruction set, on any number of cores.
 - A model never changes after `Load` or `NewRandom`. `Forward` writes no model
   state and allocates its buffers per call, so any number of goroutines may run
-  one model at once; one call runs on one goroutine.
+  one model at once. A call spreads its frames over `GOMAXPROCS` goroutines,
+  each output written by one of them in one order.
 - `Forward` returns one vector per frame, the heads end to end as `Outputs`
   lists them, and nil for no frames. `Slice` returns a head's part of a vector,
   sharing its memory, and nil for a head the model has not.
@@ -164,9 +167,12 @@ func main() {
   checks `m.Config()` after `Load`.
 - Every frame must hold exactly `Inputs` × `Channels` features. `Forward` does
   not check: a longer frame spills into the next one's place ([todo](doc/todo.md)).
-- Outputs agree across platforms only to float32 rounding: arm64, and amd64 at
-  `GOAMD64=v3`, fuse multiplies and adds, so their bits differ from amd64 v1 and
-  386, which agree with each other.
+- Outputs agree across platforms only to float32 rounding: the vector kernels
+  (amd64 with AVX2 and FMA, arm64) sum in lanes, and arm64 and amd64 at
+  `GOAMD64=v3` fuse the other multiplies and adds. amd64 without AVX2 at v1, 386
+  and wasm run the plain loops and agree bit for bit.
+- `Forward` takes every core `GOMAXPROCS` allows; callers running several at
+  once share them.
 - `Load` panics, rather than returning an error, on a header whose shape is too
   large to allocate ([todo](doc/todo.md)). Load files from trainers you trust.
 - `Layers` is ignored when `Towers` are given, and `Heads` counts attention

@@ -209,6 +209,42 @@ func TestConvolutionMatchesItsDefinition(t *testing.T) {
 	}
 }
 
+// TestKernelsMatchThePlainLoops: at every length the vector kernels split
+// differently, and from unaligned starts, dot and axpy agree with the plain
+// loops to float32 rounding, and axpy writes nothing outside its slice.
+func TestKernelsMatchThePlainLoops(t *testing.T) {
+	const u = 0x1p-24
+	a, b := frames(1, 1100, 6)[0], frames(1, 1100, 7)[0]
+	s, w := a[1099], a[1098]
+	for n := range 1030 {
+		if n > 100 && n != 255 && n != 256 && n != 1023 {
+			continue
+		}
+		for off := range 4 {
+			x, y := a[off:off+n], b[off:off+n]
+			got, want, mag := dot(s, x, y), dotGeneric(s, x, y), math.Abs(float64(s))
+			for i := range x {
+				mag += math.Abs(float64(x[i]) * float64(y[i]))
+			}
+			if d := math.Abs(float64(got - want)); d > 2*float64(n+1)*u*mag {
+				t.Fatalf("dot of %d from %d: %g, the loop %g", n, off, got, want)
+			}
+			ys, yp := slices.Clone(b[:off+n+1]), slices.Clone(b[:off+n+1])
+			axpy(w, x, ys[off:off+n])
+			axpyGeneric(w, x, yp[off:off+n])
+			for i := range ys {
+				tol := 0.0
+				if i >= off && i < off+n {
+					tol = 2 * u * (math.Abs(float64(b[i])) + math.Abs(float64(w)*float64(a[i])))
+				}
+				if math.Abs(float64(ys[i]-yp[i])) > tol {
+					t.Fatalf("axpy of %d from %d, element %d: %g, the loop %g", n, off, i, ys[i], yp[i])
+				}
+			}
+		}
+	}
+}
+
 // TestForwardShapesAndDeterminism: a frame per input, a head's worth per frame,
 // the same twice.
 func TestForwardShapesAndDeterminism(t *testing.T) {
@@ -236,7 +272,8 @@ func TestForwardShapesAndDeterminism(t *testing.T) {
 
 // BenchmarkForward is the baseline for performance work: 3.3 million weights,
 // width 256 in eight heads, four layers, a feed-forward of 1024 and a window of
-// 64 frames either side, run over 512 frames of 230 inputs into 318 outputs.
+// 64 frames either side, run over 512 frames of 230 inputs into 318 outputs, on
+// GOMAXPROCS cores (-cpu sets them).
 func BenchmarkForward(b *testing.B) {
 	const T = 512
 	m, err := NewRandom(Config{Inputs: 230, Dim: 256, Heads: 8, Layers: 4, FFN: 1024, Window: 64, Outputs: []Head{{"y", 318}}}, 1)
@@ -249,4 +286,25 @@ func BenchmarkForward(b *testing.B) {
 		m.Forward(in)
 	}
 	b.ReportMetric(float64(T*b.N)/b.Elapsed().Seconds(), "frames/s")
+}
+
+// BenchmarkKernels times dot and axpy at the width, each against its plain loop.
+func BenchmarkKernels(b *testing.B) {
+	x, y := frames(1, 256, 1)[0], frames(1, 256, 2)[0]
+	var s float32
+	for _, k := range []struct {
+		name string
+		f    func()
+	}{
+		{"dot", func() { s = dot(s, x, y) }},
+		{"dot-loop", func() { s = dotGeneric(s, x, y) }},
+		{"axpy", func() { axpy(1e-9, x, y) }},
+		{"axpy-loop", func() { axpyGeneric(1e-9, x, y) }},
+	} {
+		b.Run(k.name, func(b *testing.B) {
+			for b.Loop() {
+				k.f()
+			}
+		})
+	}
 }
