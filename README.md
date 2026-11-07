@@ -60,6 +60,7 @@ type Cells struct { // a cell net's sizes, doc/format.md's header in its order
     Cell, CellTime, CellFreq        int
     Stride                          int
     Depth, NearTime, NearFreq       int
+    Long                            []int
     First, Read, Heads, Regions     int
     Scalars                         []int
     Frame, FrameTime                int
@@ -100,7 +101,9 @@ func (m *Model) Parameters() int
 
 A **cell net** (`Config.Cells`) reads the same frames as an image and has no
 attention: a 1×1 convolution and a wide one over the features, one to cells a
-`Stride` of features apart, and `Depth` over the cells each added back, all GELU,
+`Stride` of features apart, `Depth` over the cells each added back, and one more
+for each of `Long`, over three frames that far apart so a cell hears further in
+time for few weights, all GELU,
 give each cell its heads through a 1×1 convolution, the same weights at every
 cell, a head of several channels laying one channel's cells after another's;
 the frame's heads come from the wide channels averaged to `Regions`, the

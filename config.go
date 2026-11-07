@@ -56,6 +56,7 @@ type Cells struct {
 	Cell, CellTime, CellFreq  int // of the convolution to cells, cell j centred on bin Stride·j
 	Stride                    int
 	Depth, NearTime, NearFreq int   // convolutions over the cells in turn, each added back, and their kernel
+	Long                      []int // then one of 3 frames by NearFreq cells for each, its frames this far apart, each added back
 	First, Read               int   // the first cell the cell heads read, and how many
 	Heads                     int   // how many of Outputs, from the first, are per cell
 	Regions                   int   // runs of bins each wide channel averages to for the frame path
@@ -108,6 +109,11 @@ func (c Config) validateCells() error {
 	for _, h := range c.Outputs[:n.Heads] {
 		if h.Size < 1 || h.Size%n.Read != 0 {
 			return fmt.Errorf("transformer: cell head %q of %d is no multiple of %d cells", h.Name, h.Size, n.Read)
+		}
+	}
+	for _, d := range n.Long {
+		if d < 1 {
+			return fmt.Errorf("transformer: frames %d apart in a long convolution", d)
 		}
 	}
 	for _, s := range n.Scalars {

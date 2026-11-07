@@ -12,7 +12,7 @@ import (
 type cellNet struct {
 	cfg                 Config
 	reduce, wide, cells conv
-	near                []conv
+	near, long          []conv
 	cellout             conv
 	frame1, frame2      conv // over the frames alone, Freq 1
 	frameout            conv // a linear layer, Time and Freq 1
@@ -35,6 +35,9 @@ func newCellNet(cfg Config) net {
 	for range c.Depth {
 		n.near = append(n.near, k(c.Cell, c.Cell, c.NearTime, c.NearFreq))
 	}
+	for range c.Long {
+		n.long = append(n.long, k(c.Cell, c.Cell, longTime, c.NearFreq))
+	}
 	return n
 }
 
@@ -47,6 +50,9 @@ func (n *cellNet) tensors() []tensor {
 	ls := []layer{{"reduce", &n.reduce, 4}, {"wide", &n.wide, 4}, {"cells", &n.cells, 4}}
 	for i := range n.near {
 		ls = append(ls, layer{fmt.Sprintf("near.%d", i), &n.near[i], 4})
+	}
+	for i := range n.long {
+		ls = append(ls, layer{fmt.Sprintf("long.%d", i), &n.long[i], 4})
 	}
 	ls = append(ls, layer{"cellout", &n.cellout, 4}, layer{"frame1", &n.frame1, 3}, layer{"frame2", &n.frame2, 3}, layer{"frameout", &n.frameout, 2})
 	var ts []tensor
@@ -69,10 +75,17 @@ func (n *cellNet) randomize(rng *rand.Rand) {
 	}
 }
 
-// cellBlock is the most frames a goroutine runs at once: a block computes again
-// the frames around it that its outputs reach, so larger ones waste less, and
-// the blocks come in a multiple of the cores, so the last round keeps them busy
-const cellBlock = 128
+// longTime is a long convolution's frames
+const longTime = 3
+
+// cellBlock is the fewest frames a goroutine may run at once, and blockReach how
+// many of its reach it runs at least: a block computes again the frames around it
+// that its outputs reach, so larger ones waste less, and the blocks come in a
+// multiple of the cores, so the last round keeps them busy
+const (
+	cellBlock  = 128
+	blockReach = 8
+)
 
 // rows is a layer over a block of frames, a frame's row after another's: each
 // row its features from first, each feature's channels together, between pad
@@ -151,6 +164,9 @@ type reach struct{ reduced, wide, cells, pooled, frame int }
 func (c *Cells) reach() reach {
 	var r reach
 	r.cells = c.Depth * (c.NearTime / 2)
+	for _, d := range c.Long {
+		r.cells += d * (longTime / 2)
+	}
 	r.frame = c.Dilation * (c.AgainTime / 2)
 	r.pooled = r.frame + c.FrameTime/2
 	r.wide = max(r.cells+c.CellTime/2, r.pooled)
@@ -169,7 +185,7 @@ func (n *cellNet) scratch(block int) *cellScratch {
 	c, r := n.cfg.Cells, n.cfg.Cells.reach()
 	cells := func() *rows { return newRows(block+2*r.cells, 0, c.cells(), c.Cell, c.NearFreq/2) }
 	patch := 0
-	for _, l := range append([]conv{n.reduce, n.wide, n.cells, n.cellout, n.frame1, n.frame2, n.frameout}, n.near...) {
+	for _, l := range append(append([]conv{n.reduce, n.wide, n.cells, n.cellout, n.frame1, n.frame2, n.frameout}, n.near...), n.long...) {
 		patch = max(patch, l.Time*l.Freq*l.in)
 	}
 	return &cellScratch{
@@ -188,11 +204,12 @@ func (n *cellNet) scratch(block int) *cellScratch {
 
 func (n *cellNet) forward(frames [][]float32, y []float32) {
 	w := map[*conv][]float32{}
-	for _, l := range append([]*conv{&n.reduce, &n.wide, &n.cells, &n.cellout, &n.frame1, &n.frame2, &n.frameout}, n.nears()...) {
+	for _, l := range append([]*conv{&n.reduce, &n.wide, &n.cells, &n.cellout, &n.frame1, &n.frame2, &n.frameout}, n.overCells()...) {
 		w[l] = l.arranged()
 	}
 	T, procs := len(frames), runtime.GOMAXPROCS(0)
-	blocks := procs * ((T + procs*cellBlock - 1) / (procs * cellBlock))
+	size := max(cellBlock, blockReach*n.cfg.Cells.reach().reduced)
+	blocks := procs * ((T + procs*size - 1) / (procs * size))
 	block := (T + blocks - 1) / blocks
 	pool := sync.Pool{New: func() any { return n.scratch(block) }}
 	across(T, block, func(a, b int) {
@@ -202,10 +219,14 @@ func (n *cellNet) forward(frames [][]float32, y []float32) {
 	})
 }
 
-func (n *cellNet) nears() []*conv {
-	ls := make([]*conv, len(n.near))
+// overCells is the convolutions over the cells, in the order they run
+func (n *cellNet) overCells() []*conv {
+	var ls []*conv
 	for i := range n.near {
-		ls[i] = &n.near[i]
+		ls = append(ls, &n.near[i])
+	}
+	for i := range n.long {
+		ls = append(ls, &n.long[i])
 	}
 	return ls
 }
@@ -234,12 +255,17 @@ func (n *cellNet) block(frames [][]float32, a, b int, w map[*conv][]float32, s *
 	n.wide.run(w[&n.wide], s.reduced, s.wide, nil, from, to, T, 1, 1, true, s.patch)
 	from, to = over(r.cells)
 	n.cells.run(w[&n.cells], s.wide, s.cells[0], nil, from, to, T, c.Stride, 1, true, s.patch)
-	for i := range n.near {
-		in, out := s.cells[i%2], s.cells[(i+1)%2]
-		from, to = over(r.cells - (i+1)*(c.NearTime/2))
-		n.near[i].run(w[&n.near[i]], in, out, in, from, to, T, 1, 1, true, s.patch)
+	left := r.cells
+	for i, l := range n.overCells() {
+		in, out, dil := s.cells[i%2], s.cells[(i+1)%2], 1
+		if i >= len(n.near) {
+			dil = c.Long[i-len(n.near)]
+		}
+		left -= dil * (l.Time / 2)
+		from, to = over(left)
+		l.run(w[l], in, out, in, from, to, T, 1, dil, true, s.patch)
 	}
-	n.cellout.run(w[&n.cellout], s.cells[len(n.near)%2], s.heads, nil, a, b, T, 1, 1, false, s.patch)
+	n.cellout.run(w[&n.cellout], s.cells[(len(n.near)+len(n.long))%2], s.heads, nil, a, b, T, 1, 1, false, s.patch)
 
 	from, to = over(r.pooled)
 	for t := from; t < to; t++ {
