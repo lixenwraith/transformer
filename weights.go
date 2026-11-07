@@ -17,7 +17,7 @@ import (
 // Load reads oldestVersion on: a trained file keeps the version it was written in.
 const (
 	fileMagic     = "VIFT"
-	fileVersion   = 4
+	fileVersion   = 5
 	oldestVersion = 2
 	maxName       = 64
 	maxTensor     = 1 << 28 // floats in one tensor
@@ -157,7 +157,7 @@ func Load(r io.Reader) (*Model, error) {
 	if cfg.Channels < 1 {
 		return nil, errors.New("transformer: no input channel")
 	}
-	if err := kinds[kind].load(geti, &cfg); err != nil {
+	if err := kinds[kind].load(geti, int(version), &cfg); err != nil {
 		return nil, err
 	}
 	if err := get(&u32); err != nil || u32 > 64 {
@@ -247,7 +247,7 @@ func saveTransformer(put func(...int), c Config) {
 	}
 }
 
-func loadTransformer(get func() (int, error), c *Config) error {
+func loadTransformer(get func() (int, error), _ int, c *Config) error {
 	var n int
 	if err := fill(get, &c.Dim, &c.Heads, &c.Layers, &c.FFN, &c.Window, &n); err != nil || n < 0 || n > 16 {
 		return errors.New("transformer: convolutions")
@@ -278,8 +278,11 @@ func (c *Cells) sizes() []*int {
 		&c.Depth, &c.NearTime, &c.NearFreq, &c.First, &c.Read, &c.Heads, &c.Regions, &c.Frame, &c.FrameTime, &c.AgainTime, &c.Dilation}
 }
 
-// maxScalars bounds a cell net's scalars before its Config is checked
-const maxScalars = 64
+// these bound a cell net's lists before its Config is checked
+const (
+	maxScalars = 64
+	maxLong    = 16
+)
 
 func saveCells(put func(...int), c Config) {
 	for _, p := range c.Cells.sizes() {
@@ -287,9 +290,11 @@ func saveCells(put func(...int), c Config) {
 	}
 	put(len(c.Cells.Scalars))
 	put(c.Cells.Scalars...)
+	put(len(c.Cells.Long))
+	put(c.Cells.Long...)
 }
 
-func loadCells(get func() (int, error), c *Config) error {
+func loadCells(get func() (int, error), version int, c *Config) error {
 	c.Cells = &Cells{}
 	var n int
 	if err := fill(get, append(c.Cells.sizes(), &n)...); err != nil || n < 0 || n > maxScalars {
@@ -298,6 +303,18 @@ func loadCells(get func() (int, error), c *Config) error {
 	c.Cells.Scalars = make([]int, n)
 	for i := range c.Cells.Scalars {
 		if err := fill(get, &c.Cells.Scalars[i]); err != nil {
+			return err
+		}
+	}
+	if version < 5 {
+		return nil
+	}
+	if err := fill(get, &n); err != nil || n < 0 || n > maxLong {
+		return errors.New("transformer: a cell net's long convolutions")
+	}
+	c.Cells.Long = make([]int, n)
+	for i := range c.Cells.Long {
+		if err := fill(get, &c.Cells.Long[i]); err != nil {
 			return err
 		}
 	}

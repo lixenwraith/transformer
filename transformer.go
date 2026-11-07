@@ -221,7 +221,7 @@ var kinds = [...]struct {
 	validate func(Config) error
 	build    func(Config) net
 	save     func(put func(...int), cfg Config)
-	load     func(get func() (int, error), cfg *Config) error
+	load     func(get func() (int, error), version int, cfg *Config) error
 }{
 	kindTransformer: {Config.validateTransformer, newTransformer, saveTransformer, loadTransformer},
 	kindCells:       {Config.validateCells, newCellNet, saveCells, loadCells},

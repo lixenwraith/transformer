@@ -9,7 +9,7 @@ is padded or aligned.
 
 ```
 magic      4 bytes     "VIFT" (56 49 46 54)
-version    u32         4
+version    u32         5
 kind       u32         0 a transformer, 1 a cell net
 inputs     u32         features in a channel of a frame
 channels   u32         1 or more, the planes of inputs a frame lays end to end
@@ -63,6 +63,8 @@ frame      u32 × 2     channels, frames of the frame path's first convolution
 again      u32 × 2     frames, and their spacing, of its second
 nscalars   u32         0 to 64, then for each:
   scalar   u32           an input of a frame, its channels end to end, the frame path reads
+nlong      u32         0 to 16, then for each (version 5 on; none before):
+  long     u32           the frames apart of a convolution over the cells after the near ones
 ```
 
 The header carries the `Config`: the sizes, the lists and its `Outputs`.
@@ -126,6 +128,8 @@ cells.weight       cell × wide × cell frames × cell features
 cells.bias         cell
 near.{d}.weight    cell × cell × near frames × near features      d from 0 to depth − 1
 near.{d}.bias      cell
+long.{l}.weight    cell × cell × 3 × near features               l from 0 to nlong − 1
+long.{l}.bias      cell
 cellout.weight     out × cell × 1 × 1                            out: the cell heads' sizes over read, summed
 cellout.bias       out
 frame1.weight      frame × (wide·regions + nscalars) × frame frames
@@ -179,7 +183,8 @@ kernel centred on each frame, zero past the sequence's ends:
    stride·j, those before bin 0 zero, for each j whose last bin is a bin:
    (bins + ⌊cell features/2⌋ − cell features) / stride + 1 cells, rounded down,
    then the GELU. Each `near` in turn runs over the cells, zero past them, and
-   adds its input back before its GELU. The 1×1 `cellout` makes the cell heads'
+   adds its input back before its GELU, and each `long` after them the same way
+   over three frames `long` apart, those past the sequence zero. The 1×1 `cellout` makes the cell heads'
    channels at cells `first` to `first + read`: a cell head of size k·read takes
    the next k channels, each channel's `read` cells after the one before.
 3. The frame path averages each `wide` channel over `regions` runs of the bins,
@@ -226,6 +231,6 @@ an error ([todo](todo.md)).
 
 The version is the layout's: a change to these bytes bumps it, in
 `fileVersion` and here in one commit, and `Load` reads the versions it knows.
-`Save` writes 4, which added `kind`; `Load` reads 3, which added `channels`,
-and 2, since trained files carry them. Every file trained so far carries the magic `VIFT`, so
+`Save` writes 5, which added a cell net's `long`; `Load` reads 4, which added
+`kind`, 3, which added `channels`, and 2, since trained files carry them. Every file trained so far carries the magic `VIFT`, so
 a new magic is a versioned change of its own ([todo](todo.md)).

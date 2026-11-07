@@ -15,10 +15,10 @@ func tiny() Config {
 }
 
 // tinyCells is a cell net of every part, three channels of 21 inputs, seven
-// cells, two convolutions over them and a cell head of two channels
+// cells, two convolutions over them, two long ones and a cell head of two channels
 func tinyCells() Config {
 	return Config{Inputs: 21, Channels: 3, Outputs: []Head{{"c1", 5}, {"c2", 10}, {"f", 3}}, Cells: &Cells{
-		Bins: 20, Reduce: 2, Wide: 3, WideTime: 3, WideFreq: 5, Cell: 4, CellTime: 3, CellFreq: 3, Stride: 3, Depth: 2, NearTime: 3, NearFreq: 3,
+		Bins: 20, Reduce: 2, Wide: 3, WideTime: 3, WideFreq: 5, Cell: 4, CellTime: 3, CellFreq: 3, Stride: 3, Depth: 2, NearTime: 3, NearFreq: 3, Long: []int{2, 5},
 		First: 1, Read: 5, Heads: 2, Regions: 4, Scalars: []int{20, 62}, Frame: 5, FrameTime: 3, AgainTime: 3, Dilation: 2}}
 }
 
@@ -291,6 +291,9 @@ func TestCellNetMatchesItsDefinition(t *testing.T) {
 	for i := range n.near {
 		cells = g(conv(cells, &n.near[i], c.NearTime/2, c.NearFreq/2, 1, 1, c.cells()), cells)
 	}
+	for i, d := range c.Long {
+		cells = g(conv(cells, &n.long[i], d, c.NearFreq/2, 1, d, c.cells()), cells)
+	}
 	heads := conv(cells, &n.cellout, 0, 0, 1, 1, c.cells())
 	pooled := make([][][]float64, c.pooled())
 	for i := range pooled {
@@ -431,12 +434,18 @@ func BenchmarkKernels(b *testing.B) {
 	}
 }
 
-// BenchmarkCellNet is the cell net's: 169,862 weights, the rip's notes model of
-// 16 channels of 214 inputs, 71 cells and 318 outputs, over 512 frames.
+// BenchmarkCellNet is the cell net's: the rip's notes model of 16 channels of 214
+// inputs, 71 cells and 318 outputs, over 2584 frames, 30 s, without and with the
+// long convolutions that take it from 169,862 weights to 197,606.
 func BenchmarkCellNet(b *testing.B) {
-	const T = 512
+	b.Run("near", func(b *testing.B) { benchCells(b, nil) })
+	b.Run("long", func(b *testing.B) { benchCells(b, []int{3, 9, 27}) })
+}
+
+func benchCells(b *testing.B, long []int) {
+	const T = 2584
 	cfg := Config{Inputs: 214, Channels: 16, Outputs: []Head{{"pitch", 69}, {"strike", 69}, {"release", 69}, {"velocity", 69}, {"frame", 42}}, Cells: &Cells{
-		Bins: 213, Reduce: 8, Wide: 16, WideTime: 3, WideFreq: 39, Cell: 32, CellTime: 7, CellFreq: 3, Stride: 3, Depth: 1, NearTime: 7, NearFreq: 3,
+		Bins: 213, Reduce: 8, Wide: 16, WideTime: 3, WideFreq: 39, Cell: 32, CellTime: 7, CellFreq: 3, Stride: 3, Depth: 1, NearTime: 7, NearFreq: 3, Long: long,
 		First: 1, Read: 69, Heads: 4, Regions: 16, Scalars: []int{213, 1925}, Frame: 64, FrameTime: 5, AgainTime: 9, Dilation: 2}}
 	m, err := NewRandom(cfg, 1)
 	if err != nil {
