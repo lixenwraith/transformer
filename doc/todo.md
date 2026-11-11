@@ -77,6 +77,65 @@ Medians of three to five, one `-cpu` a process:
   AVX2 kernels, blocks over cores   0.34 s   1500 frames/s   0.094 s  5430 frames/s
 ```
 
+`BenchmarkStream` is the two benchmarks' frames through a stream, 43 a write
+as the rip's half second, beside `Forward` over them whole: the transformer's
+512 frames and the notes model's 2584 with `Long` 3, 9 and 27. Medians of five,
+one `-cpu` a process:
+
+```
+                                      1 core           4 cores
+4-vCPU Xeon, AVX2
+  transformer, Forward                2770 frames/s    9180 frames/s
+  transformer, a stream at its reach  2730 frames/s    6200 frames/s
+  transformer, a stream waiting 46    3020 frames/s    6500 frames/s
+  cell net, Forward                   1230 frames/s    4790 frames/s
+  cell net, a stream                  1480 frames/s    1450 frames/s
+```
+
+A caller that ran `Forward` over a window around each write's frames, as the
+rip's ear did over 150 for 43, ran each frame three and a half times. The cell
+net's `Forward` runs blocks of the stream's pass, and allocates 6.5 MB a call
+on one core where it took 27.5, 13.4 MB on four where it took 97, at one speed.
+
+### Bring a short stream nearer Forward
+
+- Priority: P2
+- Affected files: `stream.go` (`transformerNet.pass`)
+
+A transformer's stream under its reach shares its look-ahead evenly over a
+stack's blocks. On random weights, whose attention is near flat
+(`BenchmarkForward`'s model, three seeds, 1024 frames, outputs of rms 1),
+its outputs lie from `Forward`'s by, rms and worst:
+
+```
+waiting 46 frames    15%   1.2 to 1.5
+waiting 86           11%   0.9 to 1.0
+waiting 128           8%   0.6 to 0.7
+waiting 192         4.5%   0.4
+`Forward` over 64 before and 46 after each 43, the rip's ear before streams
+                      3%   0.2 to 0.3
+```
+
+Other shares of 46 did no better: all to the first block 26%, all to the last
+32%, 20, 13, 8 and 5 from the first 15.1%. What is left: the measure on trained
+weights, which the rip takes on its recordings; a pass that runs the frames
+within the look-ahead twice, every block attending as far as the frames in and
+again once the next write brings more, about the window's outputs at twice a
+frame's cost; and a trainer that masks each block's attention as the short
+stream does, so the weights expect it.
+
+### Spread a stream's write over the cores
+
+- Priority: P3
+- Affected files: `cells.go` (`cellPass`), `stream.go`, `transformer.go`
+  (`across`)
+
+A cell net's stream runs on its caller's goroutine, 1450 frames a second on
+any number of cores, and a transformer's hands each of four cores eleven
+frames of a 43-frame write, 6200 frames a second against `Forward`'s 9180 over
+512 (above). A cell net's convolution could run its cells across the cores;
+where the transformer's write loses its third is unmeasured.
+
 ### Make the cell net's pass cheaper
 
 - Priority: P2

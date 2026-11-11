@@ -33,6 +33,26 @@ that a document now states, and link the document instead.
   CGO_ENABLED=0 go test -c` binary runs on Android from `/data/local/tmp` under
   `adb shell`. A phone heats up over a run; give each `-test.cpu` a fresh start.
 
+## The pass
+
+- `Forward` and a `Stream` share each kind's arithmetic (`layer.project`,
+  `attend`, `layer.feed`, `conv.apply`; the cell net's `Forward` is blocks of
+  its stream's pass), so a change to one moves both, and
+  `TestAStreamGivesForwardsOutputs` holds them equal. Its models' biases are
+  set: `NewRandom`'s are zero, and a frame read past the sequence's end as a
+  layer's output over zeros, where the layer's own zero belongs, shows only
+  under a bias.
+- To hold `Forward`'s bits through a refactor, a scratch module with `replace`
+  to the checkout prints a hash of the outputs of several shapes and lengths
+  (both kinds, convolutions and towers, lengths under and over a block); build
+  it on main and on the branch, at `GOMAXPROCS` 1 and 4.
+- A cell net's layer starts a block only as far before it as the layers after
+  it read (`rows.reach`); starting each a block's whole reach before it cost
+  `BenchmarkCellNet` 2 to 5% on one core. Chunks of 8 frames (`cellChunk`) ran
+  slower than 16; 16, 32 and 64 ran alike.
+- A planted fault shows a test can fail. Copy the file aside first: `git
+  checkout` on it throws away the uncommitted work beside the fault.
+
 ## The float32 check
 
 - `Forward` and a trainer's model agree to float32 rounding, and only a check
