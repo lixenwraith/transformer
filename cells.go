@@ -166,11 +166,11 @@ func (c *conv) run(w []float32, in, out, res *rows, from, to, T, stride, dil int
 				if res != nil {
 					v += res.row(t)[res.from(j)+o]
 				}
-				if act {
-					v = gelu(v)
-				}
 				at[o] = v
 			}
+		}
+		if act {
+			geluRow(row[out.from(out.first):out.from(out.first+out.feats)])
 		}
 	}
 }

@@ -20,8 +20,9 @@ its weight file ([doc/format.md](doc/format.md)).
     transformer's pass over one;
   - `cells.go`: the cell net's layers, its pass over frames as they come, which
     `Forward` runs in blocks, and the convolution it runs each layer with;
-  - `kernel_*.go`, `kernel_*.s`: the inner products, on AVX2 and FMA on amd64
-    when the CPU has them, NEON on arm64, and the plain loops elsewhere;
+  - `kernel_*.go`, `kernel_*.s`: the inner products and a row's GELU, on AVX2
+    and FMA on amd64 when the CPU has them, NEON on arm64, and the plain loops
+    elsewhere;
   - `weights.go`: the weight file, `Save` and `Load`.
 - [doc/format.md](doc/format.md): the weight file's contract, enough for a
   trainer in any language to write one.
@@ -98,7 +99,8 @@ func (s *Stream) Close() [][]float32                   // the rest, the sequence
   max-pool over the features.
 - **An input layer**, linear, from a frame's features to the width.
 - **Blocks**, pre-norm: multi-head attention over a window of frames on either
-  side, then an exact-GELU feed-forward, each added back to its input.
+  side, then a feed-forward through the GELU x·Φ(x), not its tanh
+  approximation, each added back to its input.
   Attention carries ALiBi biases, a slope per head on the frame distance, in
   place of position embeddings, so a model runs over a sequence of any length.
 - **Stacks**: one of `Layers` blocks computing every head, or towers, each a
@@ -133,9 +135,11 @@ frame's output comes once the frames it reads after it are in, `Reach` of them:
 `Stream(m.Reach())` gives `Forward`'s outputs bit for bit, however the frames
 are cut into writes. A transformer's stream may wait fewer: `Stream(ahead)`
 under the reach gives each convolution its half kernel and shares the rest
-evenly over each stack's blocks, a block attending that few frames past a
-frame and `Window` before it. Its outputs are no longer `Forward`'s, and still
-the same for any cut. A cell net always waits its reach.
+evenly over each stack's blocks, the first taking what does not divide, a
+block attending that few frames past a frame and `Window` before it: waiting
+46 frames, 0.53 s, the four blocks attend 12, 12, 11 and 11 ahead. Its outputs
+are no longer `Forward`'s, and still the same for any cut. A cell net always
+waits its reach.
 
 [doc/format.md](doc/format.md) states the computation exactly, for a trainer to
 match.
@@ -231,7 +235,8 @@ func main() {
 - Outputs agree across platforms only to float32 rounding: the vector kernels
   (amd64 with AVX2 and FMA, arm64) sum in lanes, and arm64 and amd64 at
   `GOAMD64=v3` fuse the other multiplies and adds. amd64 without AVX2 at v1, 386
-  and wasm run the plain loops and agree bit for bit.
+  and wasm run the plain loops and agree bit for bit. The GELU alone gives one
+  value's bits everywhere: no kernel fuses its multiplies.
 - `Forward` takes every core `GOMAXPROCS` allows; callers running several at
   once share them. A transformer's stream spreads each write over them too; a
   cell net's runs on its caller's goroutine ([todo](doc/todo.md)).

@@ -122,10 +122,53 @@ func (ln *layerNorm) apply(x []float32, frames int, y []float32) {
 	}
 }
 
-// gelu is the exact Gaussian error linear unit, not its tanh approximation
-func gelu(v float32) float32 {
-	x := float64(v)
-	return float32(0.5 * x * (1 + math.Erf(x/math.Sqrt2)))
+// geluK is the GELU's tail in the order the kernels read it: where it ends and
+// where its two pieces meet, then each piece's middle and its polynomial's
+// coefficients from the highest down
+var geluK = [...]float32{6, 2.5,
+	1.25, 2.0311554e-06, 1.2555251e-05, -4.8320144e-05, -1.2066456e-04, 6.5743586e-04, 2.4298027e-04, -5.679629e-03, 6.5759392e-03, 2.5342457e-02, -8.247764e-02, 7.9552084e-02,
+	4.25, -8.5633125e-08, 2.0884119e-07, 5.2590707e-07, -3.5862936e-06, 1.1100001e-05, -2.5415482e-05, 4.2983236e-05, -5.230227e-05, 4.433294e-05, -2.3765999e-05, 6.108245e-06,
+}
+
+// gelu is the Gaussian error linear unit x·Φ(x), as max(x, 0) − a·tail(a) over
+// a = |x| up to the tail's end: tail is Φ(−a) less its value there, a piece
+// either side of the split, each (its end − a) × its polynomial. Every product
+// is rounded before its sum, so the kernels' lanes give these bits.
+func gelu(x float32) float32 {
+	const top, split, near, far = 0, 1, 2, 14
+	k := &geluK
+	a := math.Float32frombits(math.Float32bits(x) &^ (1 << 31))
+	if a > k[top] {
+		a = k[top]
+	}
+	u, v := a, a
+	if u > k[split] {
+		u = k[split]
+	}
+	if v < k[split] {
+		v = k[split]
+	}
+	tail := float32((k[split]-u)*geluPiece(k[near:far], u)) + float32((k[top]-v)*geluPiece(k[far:], v))
+	if !(x > 0) {
+		x = 0
+	}
+	return x - float32(a*tail)
+}
+
+// geluPiece is a piece's polynomial at u: k its middle, then its coefficients
+func geluPiece(k []float32, u float32) float32 {
+	d, p := u-k[0], k[1]
+	for _, c := range k[2:] {
+		p = float32(p*d) + c
+	}
+	return p
+}
+
+// geluRow takes the GELU of each of x in place, the kernel's lanes first
+func geluRow(x []float32) {
+	for i := geluWide(x); i < len(x); i++ {
+		x[i] = gelu(x[i])
+	}
 }
 
 type layer struct {
@@ -148,9 +191,7 @@ func (l *layer) feed(h []float32, frames int, n, ff, o []float32) {
 	l.ln2.apply(h, frames, n)
 	l.ff1.apply(n, frames, ff)
 	across(frames, frameBlock, func(lo, hi int) {
-		for j := lo * l.ff1.Out; j < hi*l.ff1.Out; j++ {
-			ff[j] = gelu(ff[j])
-		}
+		geluRow(ff[lo*l.ff1.Out : hi*l.ff1.Out])
 	})
 	l.ff2.apply(ff, frames, o)
 	for j := range h[:frames*l.ff2.Out] {
@@ -200,9 +241,7 @@ func (c *conv) apply(x []float32, base, from, to, T, f int, y []float32) {
 						}
 					}
 				}
-				for k := range yo {
-					yo[k] = gelu(yo[k])
-				}
+				geluRow(yo)
 				if c.Pool == 1 {
 					continue
 				}

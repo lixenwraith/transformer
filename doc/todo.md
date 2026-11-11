@@ -47,55 +47,47 @@ subtracts.
 
 ## Speed
 
-`BenchmarkForward` is the before: a width-256 model of eight heads, four layers,
-a feed-forward of 1024 and a window of 64, over 512 frames of 230 inputs into
-318 outputs, 8.1 MB a call. Medians of three to six, one `-cpu` a process:
+The benchmarks run the rip's shapes. A frame is 256 samples at 22050 Hz to the
+rip, 86 a second of audio.
+
+- `BenchmarkForward`: a width-256 model of eight heads, four layers, a
+  feed-forward of 1024 and a window of 64, over 512 frames of 230 inputs into
+  318 outputs, 8.2 MB a call.
+- `BenchmarkCellNet`: the rip's notes model, 16 channels of 214 inputs, 71
+  cells and 318 outputs, over 2584 frames, 30 s; `near` without long
+  convolutions, 169,862 weights, and `long` with `Long` 3, 9 and 27, 197,606.
+- `BenchmarkStream`: their frames through a stream, 43 a write as the rip's
+  half second, the cell net's with `Long`.
+
+Frames a second on a 4-vCPU Xeon with AVX2, medians of five, one `-cpu` a
+process, with the GELU a `math.Erf` a value and with it over a row in the
+kernels:
 
 ```
-                                    1 core                all cores
-4-vCPU Xeon 2.1 GHz, AVX2
-  plain loops, one goroutine        1.31 s    390 frames/s   1.31 s    390 frames/s
-  AVX2 kernels, frames over cores   0.259 s  1977 frames/s   0.074 s  6960 frames/s
-Pixel 8 Pro (Tensor G3), NEON
-  plain loops, one goroutine        1.22 s    421 frames/s
-  NEON kernels, frames over 9 cores 0.247 s  2071 frames/s   0.372 s  1376 frames/s
+                                    math.Erf a value     a row in the kernels
+                                    1 core    4 cores    1 core    4 cores
+Forward, transformer                  2900       8910      3880      12490
+Forward, cell net near                1950       7280      2810       9800
+Forward, cell net long                1230       4530      1910       7050
+stream, transformer at its reach      2730       5960      3780       7760
+stream, transformer waiting 46        2980       6570      4420       8420
+stream, cell net long                 1450       1460      2300       2230
 ```
 
-A frame is 256 samples at 22050 Hz to the rip, 86 a second of audio. A 30 s rip
-with 12a on the Pixel, 2584 frames, takes 2.56 s on one core and 1.07 s on
-nine. `GOEXPERIMENT=simd`'s package would make every importer set the
-experiment, so the kernels are assembly.
+A row's GELU takes 1 ns a value in the AVX2 kernel and 15 through the plain
+function, where `math.Erf` took 23. A caller that ran `Forward` over a window
+around each write's frames, as the rip's ear did over 150 for 43, ran each
+frame three and a half times. The cell net's `Forward` runs blocks of the
+stream's pass, and allocates 6.5 MB a call on one core where it took 27.5,
+13.4 MB on four where it took 97.
 
-`BenchmarkCellNet` is the rip's notes model: 169,862 weights, 16 channels of
-214 inputs, 71 cells, 318 outputs, 5.6 million multiplies a frame, 512 frames.
-Medians of three to five, one `-cpu` a process:
-
-```
-                                    1 core                4 cores
-4-vCPU Xeon 2.1 GHz, AVX2
-  plain loops                       1.77 s    290 frames/s   0.50 s   1026 frames/s
-  AVX2 kernels, blocks over cores   0.34 s   1500 frames/s   0.094 s  5430 frames/s
-```
-
-`BenchmarkStream` is the two benchmarks' frames through a stream, 43 a write
-as the rip's half second, beside `Forward` over them whole: the transformer's
-512 frames and the notes model's 2584 with `Long` 3, 9 and 27. Medians of five,
-one `-cpu` a process:
-
-```
-                                      1 core           4 cores
-4-vCPU Xeon, AVX2
-  transformer, Forward                2770 frames/s    9180 frames/s
-  transformer, a stream at its reach  2730 frames/s    6200 frames/s
-  transformer, a stream waiting 46    3020 frames/s    6500 frames/s
-  cell net, Forward                   1230 frames/s    4790 frames/s
-  cell net, a stream                  1480 frames/s    1450 frames/s
-```
-
-A caller that ran `Forward` over a window around each write's frames, as the
-rip's ear did over 150 for 43, ran each frame three and a half times. The cell
-net's `Forward` runs blocks of the stream's pass, and allocates 6.5 MB a call
-on one core where it took 27.5, 13.4 MB on four where it took 97, at one speed.
+The plain loops ran `BenchmarkForward` a fifth as fast as the kernels, both
+with `math.Erf`: 390 frames a second against 1977 on an earlier Xeon, 421
+against 2071 on one core of a Pixel 8 Pro (Tensor G3), whose nine cores ran
+1376. A 30 s rip with 12a on the Pixel, 2584 frames, took 2.56 s on one core
+and 1.07 s on nine. The NEON GELU has run only under qemu: a phone's figures
+with it are unmeasured. `GOEXPERIMENT=simd`'s package would make every
+importer set the experiment, so the kernels are assembly.
 
 ### Bring a short stream nearer Forward
 
@@ -130,25 +122,21 @@ stream does, so the weights expect it.
 - Affected files: `cells.go` (`cellPass`), `stream.go`, `transformer.go`
   (`across`)
 
-A cell net's stream runs on its caller's goroutine, 1450 frames a second on
+A cell net's stream runs on its caller's goroutine, 2300 frames a second on
 any number of cores, and a transformer's hands each of four cores eleven
-frames of a 43-frame write, 6200 frames a second against `Forward`'s 9180 over
-512 (above). A cell net's convolution could run its cells across the cores;
-where the transformer's write loses its third is unmeasured.
+frames of a 43-frame write, 7760 frames a second against `Forward`'s 12490
+over 512 (above). A cell net's convolution could run its cells across the
+cores; where the transformer's write loses its third is unmeasured.
 
 ### Make the cell net's pass cheaper
 
 - Priority: P2
-- Affected files: `cells.go`, `transformer.go` (`gelu`), `kernel_*`
+- Affected files: `cells.go` (`conv.run`), `kernel_*`
 
-On one core the profile gives the GELU 37% (its float64 `math.Erf`, eleven
-thousand a frame), `dot` 50% and the rest the loops. `dot` reads two floats a
-multiply, so a kernel of four weight rows against one or two patches, which
-shares its loads, would near double it: `conv.run` dots every output channel
-against one patch. A scalar GELU over Numerical Recipes' `erfc` and a polynomial
-`exp` measured 21 ns against `math.Erf`'s 35, within 1.8e-7, about 1.2 times the
-pass, and would move a transformer's bits too; a GELU over a row in the vector
-kernels is the larger step.
+On one core the profile gives `dot` 79%, a row's GELU 4% and the loops and
+copies the rest. `dot` reads two floats a multiply, so a kernel of four weight
+rows against one or two patches, which shares its loads, would near double it:
+`conv.run` dots every output channel against one patch.
 
 ### Make a phone's cores beat one at 512 frames
 

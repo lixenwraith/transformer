@@ -94,7 +94,9 @@ func TestAttentionMatchesTheDenseReference(t *testing.T) {
 	}
 }
 
-// TestLayerNormAndGELU pins the two nonlinearities to their definitions.
+// TestLayerNormAndGELU pins the two nonlinearities to their definitions, the
+// GELU to x·Φ(x) within the worst its polynomials leave over every float32:
+// 4.2e-8 below zero and 2.6e-7 above, where a float32 is up to 2.4e-7 apart.
 func TestLayerNormAndGELU(t *testing.T) {
 	ln := newLayerNorm(4)
 	out := make([]float32, 4)
@@ -107,11 +109,19 @@ func TestLayerNormAndGELU(t *testing.T) {
 	if math.Abs(mean) > 1e-6 || math.Abs(sq/4-1) > 1e-3 {
 		t.Errorf("layer norm gave mean %g, power %g", mean, sq/4)
 	}
-	if g := gelu(1); math.Abs(float64(g)-0.8413447) > 1e-6 {
-		t.Errorf("gelu(1) = %g", g)
+	for i := -9 << 10; i <= 9<<10; i++ {
+		x := float32(i) / 1024
+		want, tol := 0.5*float64(x)*(1+math.Erf(float64(x)/math.Sqrt2)), 2.6e-7
+		if x < 0 {
+			tol = 4.2e-8
+		}
+		if g := gelu(x); math.Abs(float64(g)-want) > tol {
+			t.Errorf("gelu(%g) = %g, exactly %g", x, g, want)
+		}
 	}
-	if g := gelu(-10); g != 0 && math.Abs(float64(g)) > 1e-6 {
-		t.Errorf("gelu(-10) = %g", g)
+	inf := float32(math.Inf(1))
+	if g, l, n := gelu(inf), gelu(-inf), gelu(float32(math.NaN())); g != inf || l != 0 || n == n {
+		t.Errorf("gelu of +Inf, -Inf and NaN is %g, %g and %g", g, l, n)
 	}
 }
 
@@ -338,11 +348,17 @@ func TestCellNetMatchesItsDefinition(t *testing.T) {
 
 // TestKernelsMatchThePlainLoops: at every length the vector kernels split
 // differently, and from unaligned starts, dot and axpy agree with the plain
-// loops to float32 rounding, and axpy writes nothing outside its slice.
+// loops to float32 rounding and a row's GELU with gelu bit for bit, a NaN a
+// NaN, and axpy and the row write nothing outside their slices.
 func TestKernelsMatchThePlainLoops(t *testing.T) {
 	const u = 0x1p-24
 	a, b := frames(1, 1100, 6)[0], frames(1, 1100, 7)[0]
 	s, w := a[1099], a[1098]
+	wide := slices.Clone(a) // past the GELU's split and its end either side of zero
+	for i := range wide {
+		wide[i] *= 300
+	}
+	wide[7], wide[8], wide[40] = float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))
 	for n := range 1030 {
 		if n > 100 && n != 255 && n != 256 && n != 1023 {
 			continue
@@ -366,6 +382,16 @@ func TestKernelsMatchThePlainLoops(t *testing.T) {
 				}
 				if math.Abs(float64(ys[i]-yp[i])) > tol {
 					t.Fatalf("axpy of %d from %d, element %d: %g, the loop %g", n, off, i, ys[i], yp[i])
+				}
+			}
+			g := slices.Clone(wide[:off+n+1])
+			geluRow(g[off : off+n])
+			for i, v := range wide[:off+n+1] {
+				if i >= off && i < off+n {
+					v = gelu(v)
+				}
+				if math.Float32bits(g[i]) != math.Float32bits(v) && (g[i] == g[i] || v == v) {
+					t.Fatalf("the GELU of %d from %d, element %d: %g, gelu's %g", n, off, i, g[i], v)
 				}
 			}
 		}

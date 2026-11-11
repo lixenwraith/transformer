@@ -92,3 +92,69 @@ tail:
 
 done:
 	RET
+
+// STEP is one of a polynomial's: p·d, rounded, plus the next coefficient
+#define STEP(d, p) \
+	VFMUL   d, p, p          \
+	VLD1R.P 4(R4), [V8.S4]   \
+	VFADD   V8.S4, p, p
+
+// func geluNEON(x *float32, n int, k *float32)
+// gelu over n floats, a multiple of 4: no multiply fused with its add
+TEXT ·geluNEON(SB), NOSPLIT, $0-24
+	MOVD    x+0(FP), R0
+	MOVD    n+8(FP), R2
+	MOVD    k+16(FP), R3
+	VEOR    V31.B16, V31.B16, V31.B16
+	VLD1R.P 4(R3), [V30.S4]          // the tail's end
+	VLD1R.P 4(R3), [V29.S4]          // the split
+
+loop:
+	CMP     $4, R2
+	BLT     done
+	MOVD    R3, R4                    // the pieces, read in order
+	VLD1    (R0), [V0.S4]
+	VFABS   V0.S4, V1.S4
+	VFMIN   V30.S4, V1.S4, V1.S4      // a
+	VFMIN   V29.S4, V1.S4, V2.S4      // a up to the split
+	VFMAX   V29.S4, V1.S4, V3.S4      // a from the split
+	VLD1R.P 4(R4), [V8.S4]
+	VFSUB   V8.S4, V2.S4, V4.S4
+	VLD1R.P 4(R4), [V6.S4]
+	STEP(V4.S4, V6.S4)
+	STEP(V4.S4, V6.S4)
+	STEP(V4.S4, V6.S4)
+	STEP(V4.S4, V6.S4)
+	STEP(V4.S4, V6.S4)
+	STEP(V4.S4, V6.S4)
+	STEP(V4.S4, V6.S4)
+	STEP(V4.S4, V6.S4)
+	STEP(V4.S4, V6.S4)
+	STEP(V4.S4, V6.S4)
+	VFSUB   V2.S4, V29.S4, V2.S4
+	VFMUL   V2.S4, V6.S4, V6.S4
+	VLD1R.P 4(R4), [V8.S4]
+	VFSUB   V8.S4, V3.S4, V4.S4
+	VLD1R.P 4(R4), [V7.S4]
+	STEP(V4.S4, V7.S4)
+	STEP(V4.S4, V7.S4)
+	STEP(V4.S4, V7.S4)
+	STEP(V4.S4, V7.S4)
+	STEP(V4.S4, V7.S4)
+	STEP(V4.S4, V7.S4)
+	STEP(V4.S4, V7.S4)
+	STEP(V4.S4, V7.S4)
+	STEP(V4.S4, V7.S4)
+	STEP(V4.S4, V7.S4)
+	VFSUB   V3.S4, V30.S4, V3.S4
+	VFMUL   V3.S4, V7.S4, V7.S4
+	VFADD   V6.S4, V7.S4, V6.S4       // the tail
+	VFMUL   V1.S4, V6.S4, V6.S4
+	VFMAX   V31.S4, V0.S4, V0.S4
+	VFSUB   V6.S4, V0.S4, V0.S4
+	VST1.P  [V0.S4], 16(R0)
+	SUB     $4, R2
+	B       loop
+
+done:
+	RET

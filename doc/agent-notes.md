@@ -33,6 +33,26 @@ that a document now states, and link the document instead.
   CGO_ENABLED=0 go test -c` binary runs on Android from `/data/local/tmp` under
   `adb shell`. A phone heats up over a run; give each `-test.cpu` a fresh start.
 
+- The GELU gives one value's bits on every kernel because no multiply is fused
+  with its add: the plain `gelu` rounds each product through `float32(...)`,
+  which the Go spec makes a barrier to fusion on arm64 and at `GOAMD64=v3`,
+  and the kernels multiply and add apart. Its minima and maxima keep a NaN:
+  x86's return their second source when either is one, which Go's assembler
+  writes first.
+- To show it after a change to `gelu`, a kernel or `geluK`, a scratch test
+  runs all 2^32 float32 through `gelu` and `geluRow` in rows of 2^16 across the
+  cores, compares their bits and sums value and bits into a checksum to carry
+  between platforms: 33 s on amd64, 11 minutes for arm64 under qemu, one sum
+  on amd64 with AVX2, at `GOAMD64=v3`, on 386 and on arm64. The same scan
+  against `math.Erf` in float64 gives the worst error the README and
+  [format.md](format.md) state.
+- `geluK`'s polynomials are minimax fits (Lawson's reweighting, 2000 Chebyshev
+  nodes) of (Φ(−u) − Φ(−s))/(s − u) over a piece ending at s, weighted by
+  u·(s − u), what an error there leaves in the GELU; each coefficient is
+  rounded to float32 from the highest down, the lower ones fitted again after
+  each. Degree 10 either side of 2.5 is where float32's own rounding, 3.7e-8
+  below zero, takes over from the fit's 2e-8; degree 9 reads 6e-8.
+
 ## The pass
 
 - `Forward` and a `Stream` share each kind's arithmetic (`layer.project`,
