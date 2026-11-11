@@ -74,14 +74,14 @@ stream, transformer waiting 46        2980       6570      4420       8420
 stream, cell net long                 1450       1460      2300       2230
 ```
 
-A row's GELU takes 1 ns a value in the AVX2 kernel and 15 through the plain
-function, where `math.Erf` took 23. A caller that ran `Forward` over a window
-around each write's frames, as the rip's ear did over 150 for 43, ran each
-frame three and a half times. The cell net's `Forward` runs blocks of the
-stream's pass, and allocates 6.5 MB a call on one core where it took 27.5,
-13.4 MB on four where it took 97. On one core it is one block, no frame
-around a block computed again: 3150 frames a second near and 2310 long,
-where the blocks gave the table's 2810 and 1910.
+Over values of rms 1 a row's GELU takes 1 ns a value in the AVX2 kernel and
+15 through the plain function, where `math.Erf` took 23. A caller that ran
+`Forward` over a window around each write's frames, as the rip's ear did over
+150 for 43, ran each frame three and a half times. The cell net's `Forward`
+runs blocks of the stream's pass, and allocates 6.5 MB a call on one core
+where it took 27.5, 13.4 MB on four where it took 97. On one core it is one
+block, no frame around a block computed again: 3150 frames a second near and
+2310 long, where the blocks gave the table's 2810 and 1910.
 
 The plain loops ran `BenchmarkForward` a fifth as fast as the kernels, both
 with `math.Erf`: 390 frames a second against 1977 on an earlier Xeon, 421

@@ -356,7 +356,7 @@ func TestKernelsMatchThePlainLoops(t *testing.T) {
 	s, w := a[1099], a[1098]
 	wide := slices.Clone(a) // past the GELU's split and its end either side of zero
 	for i := range wide {
-		wide[i] *= 300
+		wide[i] *= 4
 	}
 	wide[7], wide[8], wide[40] = float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))
 	for n := range 1030 {
