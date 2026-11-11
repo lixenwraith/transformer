@@ -119,7 +119,8 @@ the frame's heads come from the wide channels averaged to `Regions`, the
 `Scalars` beside them, through two convolutions over the frames and a linear
 layer. Its output is the cell heads, each its cells in order, then the frame
 heads. `Forward` runs it in blocks of frames across the cores, each block
-computing again the frames around it that its outputs reach.
+computing again the frames around it that its outputs reach, and as one block
+on one core.
 
 A **stream** (`Model.Stream`) takes a sequence as its frames come and runs each
 through each layer once, holding of the past what each layer still reads. A

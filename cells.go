@@ -286,9 +286,12 @@ func (p *cellPass) restart(from, to int) {
 func (n *cellNet) forward(frames [][]float32, y []float32) {
 	w, r := n.arrange(), n.reach()
 	T, procs, per := len(frames), runtime.GOMAXPROCS(0), n.cfg.outputSize()
-	size := max(cellBlock, blockReach*r)
-	blocks := procs * ((T + procs*size - 1) / (procs * size))
-	block := (T + blocks - 1) / blocks
+	block := T // one core runs each frame once, no block's reach again
+	if procs > 1 {
+		size := max(cellBlock, blockReach*r)
+		blocks := procs * ((T + procs*size - 1) / (procs * size))
+		block = (T + blocks - 1) / blocks
+	}
 	pool := sync.Pool{New: func() any { return n.newPass(w) }}
 	across(T, block, func(a, b int) {
 		p := pool.Get().(*cellPass)
