@@ -130,3 +130,73 @@ TEXT ·xgetbv(SB), NOSPLIT, $0-4
 	XGETBV
 	MOVL   AX, ret+0(FP)
 	RET
+
+// STEP is one of a polynomial's: p·d, rounded, plus the coefficient at off
+#define STEP(off, d, p) \
+	VMULPS       d, p, p    \
+	VBROADCASTSS off(DX), Y8 \
+	VADDPS       Y8, p, p
+
+// func geluAVX2(x *float32, n int, k *float32)
+// gelu over n floats, a multiple of 8: no multiply fused with its add, and the
+// minima and maxima's operands in the order that keeps a NaN
+TEXT ·geluAVX2(SB), NOSPLIT, $0-24
+	MOVQ         x+0(FP), AX
+	MOVQ         n+8(FP), CX
+	MOVQ         k+16(FP), DX
+	VPCMPEQD     Y15, Y15, Y15
+	VPSRLD       $1, Y15, Y15 // every bit but the sign
+	VXORPS       Y14, Y14, Y14
+	VBROADCASTSS (DX), Y13    // the tail's end
+	VBROADCASTSS 4(DX), Y12   // the split
+	VBROADCASTSS 8(DX), Y11   // the near piece's middle
+	VBROADCASTSS 56(DX), Y10  // the far piece's
+
+loop:
+	CMPQ         CX, $8
+	JLT          done
+	VMOVUPS      (AX), Y0
+	VANDPS       Y15, Y0, Y1
+	VMINPS       Y1, Y13, Y1  // a
+	VMINPS       Y1, Y12, Y2  // a up to the split
+	VMAXPS       Y1, Y12, Y3  // a from the split
+	VSUBPS       Y11, Y2, Y4
+	VBROADCASTSS 12(DX), Y6
+	STEP(16, Y4, Y6)
+	STEP(20, Y4, Y6)
+	STEP(24, Y4, Y6)
+	STEP(28, Y4, Y6)
+	STEP(32, Y4, Y6)
+	STEP(36, Y4, Y6)
+	STEP(40, Y4, Y6)
+	STEP(44, Y4, Y6)
+	STEP(48, Y4, Y6)
+	STEP(52, Y4, Y6)
+	VSUBPS       Y2, Y12, Y2
+	VMULPS       Y2, Y6, Y6
+	VSUBPS       Y10, Y3, Y4
+	VBROADCASTSS 60(DX), Y7
+	STEP(64, Y4, Y7)
+	STEP(68, Y4, Y7)
+	STEP(72, Y4, Y7)
+	STEP(76, Y4, Y7)
+	STEP(80, Y4, Y7)
+	STEP(84, Y4, Y7)
+	STEP(88, Y4, Y7)
+	STEP(92, Y4, Y7)
+	STEP(96, Y4, Y7)
+	STEP(100, Y4, Y7)
+	VSUBPS       Y3, Y13, Y3
+	VMULPS       Y3, Y7, Y7
+	VADDPS       Y6, Y7, Y6   // the tail
+	VMULPS       Y1, Y6, Y6
+	VMAXPS       Y14, Y0, Y0  // max(x, 0), zero for a NaN
+	VSUBPS       Y6, Y0, Y0
+	VMOVUPS      Y0, (AX)
+	ADDQ         $32, AX
+	SUBQ         $8, CX
+	JMP          loop
+
+done:
+	VZEROUPPER
+	RET

@@ -16,10 +16,13 @@ its weight file ([doc/format.md](doc/format.md)).
   - `config.go`: the shape (`Config`, `Head`, `Conv`, `Tower`) and its checks;
   - `transformer.go`: the layers, `Model`, the kinds of model, `NewRandom` and
     `Forward`;
-  - `cells.go`: the cell net's layers, its pass over a sequence in blocks, and
-    the convolution over a block's rows it runs each layer with;
-  - `kernel_*.go`, `kernel_*.s`: the inner products, on AVX2 and FMA on amd64
-    when the CPU has them, NEON on arm64, and the plain loops elsewhere;
+  - `stream.go`: `Stream`, a sequence taken as its frames come, and the
+    transformer's pass over one;
+  - `cells.go`: the cell net's layers, its pass over frames as they come, which
+    `Forward` runs in blocks, and the convolution it runs each layer with;
+  - `kernel_*.go`, `kernel_*.s`: the inner products and a row's GELU, on AVX2
+    and FMA on amd64 when the CPU has them, NEON on arm64, and the plain loops
+    elsewhere;
   - `weights.go`: the weight file, `Save` and `Load`.
 - [doc/format.md](doc/format.md): the weight file's contract, enough for a
   trainer in any language to write one.
@@ -73,10 +76,15 @@ func Load(r io.Reader) (*Model, error)                  // a weight file, checke
 func NewRandom(cfg Config, seed uint64) (*Model, error) // small random weights, for tests and a trainer's shape check
 
 func (m *Model) Forward(frames [][]float32) [][]float32 // one output vector per frame
+func (m *Model) Stream(ahead int) *Stream               // a sequence taken as its frames come
+func (m *Model) Reach() int                             // frames either side of a frame its output reads
 func (m *Model) Slice(out []float32, head string) []float32
 func (m *Model) Save(w io.Writer) error
 func (m *Model) Config() Config
 func (m *Model) Parameters() int
+
+func (s *Stream) Write(frames [][]float32) [][]float32 // the outputs these frames complete
+func (s *Stream) Close() [][]float32                   // the rest, the sequence ending
 ```
 
 ---
@@ -91,7 +99,8 @@ func (m *Model) Parameters() int
   max-pool over the features.
 - **An input layer**, linear, from a frame's features to the width.
 - **Blocks**, pre-norm: multi-head attention over a window of frames on either
-  side, then an exact-GELU feed-forward, each added back to its input.
+  side, then a feed-forward through the GELU x·Φ(x), not its tanh
+  approximation, each added back to its input.
   Attention carries ALiBi biases, a slope per head on the frame distance, in
   place of position embeddings, so a model runs over a sequence of any length.
 - **Stacks**: one of `Layers` blocks computing every head, or towers, each a
@@ -110,7 +119,28 @@ the frame's heads come from the wide channels averaged to `Regions`, the
 `Scalars` beside them, through two convolutions over the frames and a linear
 layer. Its output is the cell heads, each its cells in order, then the frame
 heads. `Forward` runs it in blocks of frames across the cores, each block
-computing again the frames around it that its outputs reach.
+computing again the frames around it that its outputs reach, and as one block
+on one core.
+
+A **stream** (`Model.Stream`) takes a sequence as its frames come and runs each
+through each layer once, holding of the past what each layer still reads. A
+frame's output comes once the frames it reads after it are in, `Reach` of them:
+
+- a transformer's is each convolution's half kernel of frames and its deepest
+  stack's `Layers` × `Window`: 256 frames for four blocks of window 64, 2.97 s
+  of the rip's 86 frames a second;
+- a cell net's is its wide convolution's half kernel and the longer of the cell
+  path's and the frame path's: 46 frames, 0.53 s, for the rip's notes model
+  with `Long` 3, 9 and 27, and 11 without.
+
+`Stream(m.Reach())` gives `Forward`'s outputs bit for bit, however the frames
+are cut into writes. A transformer's stream may wait fewer: `Stream(ahead)`
+under the reach gives each convolution its half kernel and shares the rest
+evenly over each stack's blocks, the first taking what does not divide, a
+block attending that few frames past a frame and `Window` before it: waiting
+46 frames, 0.53 s, the four blocks attend 12, 12, 11 and 11 ahead. Its outputs
+are no longer `Forward`'s, and still the same for any cut. A cell net always
+waits its reach.
 
 [doc/format.md](doc/format.md) states the computation exactly, for a trainer to
 match.
@@ -189,6 +219,10 @@ func main() {
   state and allocates its buffers per call, so any number of goroutines may run
   one model at once. A call spreads its frames over `GOMAXPROCS` goroutines,
   each output written by one of them in one order.
+- A stream that waits the model's reach gives `Forward`'s outputs, bit for bit,
+  and any stream the same outputs however its frames are cut into writes
+  (`TestAStreamGivesForwardsOutputs`). A stream holds its own state: one
+  goroutine at a time writes to it, and any number run over one model.
 - `Forward` returns one vector per frame, the heads end to end as `Outputs`
   lists them, and nil for no frames. `Slice` returns a head's part of a vector,
   sharing its memory, and nil for a head the model has not.
@@ -202,9 +236,14 @@ func main() {
 - Outputs agree across platforms only to float32 rounding: the vector kernels
   (amd64 with AVX2 and FMA, arm64) sum in lanes, and arm64 and amd64 at
   `GOAMD64=v3` fuse the other multiplies and adds. amd64 without AVX2 at v1, 386
-  and wasm run the plain loops and agree bit for bit.
+  and wasm run the plain loops and agree bit for bit. The GELU alone gives one
+  value's bits everywhere: no kernel fuses its multiplies.
 - `Forward` takes every core `GOMAXPROCS` allows; callers running several at
-  once share them.
+  once share them. A transformer's stream spreads each write over them too; a
+  cell net's runs on its caller's goroutine ([todo](doc/todo.md)).
+- A transformer's stream under its reach is a different computation from
+  `Forward`, not a rounding of it: how far its outputs lie from `Forward`'s is
+  the weights' to say ([todo](doc/todo.md)).
 - `Load` panics, rather than returning an error, on a header whose shape is too
   large to allocate ([todo](doc/todo.md)). Load files from trainers you trust.
 - `Layers` is ignored when `Towers` are given, and `Heads` counts attention
@@ -212,5 +251,7 @@ func main() {
   transformer's sizes, and its `Cells.Heads` counts the output heads per cell.
 - `Forward` allocates about 8 MB a call over 512 frames at width 256; a hot loop
   over short sequences pays for it each time. A cell net allocates its
-  rearranged weights and a block's layers for each core, 5 MB a core at the
-  rip's notes model's shape, and holds no whole-sequence layer.
+  rearranged weights and, for each core, the frames of each layer the next
+  still reads, 1 to 2 MB a core at the rip's notes model's shape, and holds no
+  whole-sequence layer. A stream allocates those frames once, and each write
+  its outputs.

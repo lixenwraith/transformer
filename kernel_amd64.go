@@ -23,6 +23,16 @@ func axpy(w float32, x, y []float32) {
 	axpyAVX2(w, &x[0], &y[0], len(x))
 }
 
+// geluWide takes the GELU of x's leading eights in place and returns how many
+func geluWide(x []float32) int {
+	n := len(x) &^ 7
+	if !avx2FMA || n == 0 {
+		return 0
+	}
+	geluAVX2(&x[0], n, &geluK[0])
+	return n
+}
+
 func hasAVX2FMA() bool {
 	const fma, osxsave, avx, avx2, xmmYmm = 1 << 12, 1 << 27, 1 << 28, 1 << 5, 6
 	if top, _, _, _ := cpuid(0, 0); top < 7 {
@@ -45,3 +55,6 @@ func dotAVX2(s float32, a, b *float32, n int) float32
 
 //go:noescape
 func axpyAVX2(w float32, x, y *float32, n int)
+
+//go:noescape
+func geluAVX2(x *float32, n int, k *float32)

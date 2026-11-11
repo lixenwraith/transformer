@@ -122,16 +122,81 @@ func (ln *layerNorm) apply(x []float32, frames int, y []float32) {
 	}
 }
 
-// gelu is the exact Gaussian error linear unit, not its tanh approximation
-func gelu(v float32) float32 {
-	x := float64(v)
-	return float32(0.5 * x * (1 + math.Erf(x/math.Sqrt2)))
+// geluK is the GELU's tail in the order the kernels read it: where it ends and
+// where its two pieces meet, then each piece's middle and its polynomial's
+// coefficients from the highest down
+var geluK = [...]float32{6, 2.5,
+	1.25, 2.0311554e-06, 1.2555251e-05, -4.8320144e-05, -1.2066456e-04, 6.5743586e-04, 2.4298027e-04, -5.679629e-03, 6.5759392e-03, 2.5342457e-02, -8.247764e-02, 7.9552084e-02,
+	4.25, -8.5633125e-08, 2.0884119e-07, 5.2590707e-07, -3.5862936e-06, 1.1100001e-05, -2.5415482e-05, 4.2983236e-05, -5.230227e-05, 4.433294e-05, -2.3765999e-05, 6.108245e-06,
+}
+
+// gelu is the Gaussian error linear unit x·Φ(x), as max(x, 0) − a·tail(a) over
+// a = |x| up to the tail's end: tail is Φ(−a) less its value there, a piece
+// either side of the split, each (its end − a) × its polynomial. Every product
+// is rounded before its sum, so the kernels' lanes give these bits.
+func gelu(x float32) float32 {
+	const top, split, near, far = 0, 1, 2, 14
+	k := &geluK
+	a := math.Float32frombits(math.Float32bits(x) &^ (1 << 31))
+	if a > k[top] {
+		a = k[top]
+	}
+	u, v := a, a
+	if u > k[split] {
+		u = k[split]
+	}
+	if v < k[split] {
+		v = k[split]
+	}
+	tail := float32((k[split]-u)*geluPiece(k[near:far], u)) + float32((k[top]-v)*geluPiece(k[far:], v))
+	if !(x > 0) {
+		x = 0
+	}
+	return x - float32(a*tail)
+}
+
+// geluPiece is a piece's polynomial at u: k its middle, then its coefficients
+func geluPiece(k []float32, u float32) float32 {
+	d, p := u-k[0], k[1]
+	for _, c := range k[2:] {
+		p = float32(p*d) + c
+	}
+	return p
+}
+
+// geluRow takes the GELU of each of x in place, the kernel's lanes first
+func geluRow(x []float32) {
+	for i := geluWide(x); i < len(x); i++ {
+		x[i] = gelu(x[i])
+	}
 }
 
 type layer struct {
 	ln1, ln2   layerNorm
 	q, k, v, o linear
 	ff1, ff2   linear
+}
+
+// project writes the queries, keys and values of frames of h, n room for its norm
+func (l *layer) project(h []float32, frames int, n, q, k, v []float32) {
+	l.ln1.apply(h, frames, n)
+	l.q.apply(n, frames, q)
+	l.k.apply(n, frames, k)
+	l.v.apply(n, frames, v)
+}
+
+// feed adds to frames of h the feed-forward of its norm; n, ff and o are room
+// for the norm, the feed-forward's width and what it adds
+func (l *layer) feed(h []float32, frames int, n, ff, o []float32) {
+	l.ln2.apply(h, frames, n)
+	l.ff1.apply(n, frames, ff)
+	across(frames, frameBlock, func(lo, hi int) {
+		geluRow(ff[lo*l.ff1.Out : hi*l.ff1.Out])
+	})
+	l.ff2.apply(ff, frames, o)
+	for j := range h[:frames*l.ff2.Out] {
+		h[j] += o[j]
+	}
 }
 
 // conv is a Conv's weights, out by in channels by Time by Freq, and its biases
@@ -141,24 +206,33 @@ type conv struct {
 	W, B []float32
 }
 
-// apply convolves x, frames by in channels by f features, into frames by Out by
-// f/Pool, the GELU taken before the pool
-func (c *conv) apply(x []float32, frames, f int) []float32 {
-	y := make([]float32, frames*c.Out*f)
-	across(frames, frameBlock, func(lo, hi int) {
-		for t := lo; t < hi; t++ {
+// apply convolves frames from to to of x, frames by in channels by f features
+// from frame base on, into y, frames by Out by f/Pool from frame from on: the
+// GELU before the pool, and no frame before the first or from T on read
+func (c *conv) apply(x []float32, base, from, to, T, f int, y []float32) {
+	g := f / c.Pool
+	across(to-from, frameBlock, func(lo, hi int) {
+		var whole []float32 // a channel before its pool
+		if c.Pool > 1 {
+			whole = make([]float32, f)
+		}
+		for t := from + lo; t < from+hi; t++ {
 			for o := range c.Out {
-				yo := y[(t*c.Out+o)*f : (t*c.Out+o+1)*f]
+				pooled := y[((t-from)*c.Out+o)*g:][:g]
+				yo := pooled
+				if c.Pool > 1 {
+					yo = whole
+				}
 				for k := range yo {
 					yo[k] = c.B[o]
 				}
 				for i := range c.in {
 					for dt := range c.Time {
 						tt := t + dt - c.Time/2
-						if tt < 0 || tt >= frames {
+						if tt < 0 || tt >= T {
 							continue
 						}
-						xi := x[(tt*c.in+i)*f : (tt*c.in+i+1)*f]
+						xi := x[((tt-base)*c.in+i)*f:][:f]
 						for dk := range c.Freq {
 							w, d := c.W[((o*c.in+i)*c.Time+dt)*c.Freq+dk], dk-c.Freq/2
 							if from, to := max(-d, 0), min(f, f-d); from < to {
@@ -167,27 +241,20 @@ func (c *conv) apply(x []float32, frames, f int) []float32 {
 						}
 					}
 				}
-				for k := range yo {
-					yo[k] = gelu(yo[k])
+				geluRow(yo)
+				if c.Pool == 1 {
+					continue
+				}
+				for k := range pooled {
+					m := yo[k*c.Pool]
+					for j := 1; j < c.Pool; j++ {
+						m = max(m, yo[k*c.Pool+j])
+					}
+					pooled[k] = m
 				}
 			}
 		}
 	})
-	if c.Pool == 1 {
-		return y
-	}
-	g := f / c.Pool
-	z := make([]float32, frames*c.Out*g)
-	for r := range frames * c.Out {
-		for k := range g {
-			m := y[r*f+k*c.Pool]
-			for j := 1; j < c.Pool; j++ {
-				m = max(m, y[r*f+k*c.Pool+j])
-			}
-			z[r*g+k] = m
-		}
-	}
-	return z
 }
 
 // tower is a Tower's blocks, final norm and output layer
@@ -208,6 +275,8 @@ type net interface {
 	tensors() []tensor                       // every weight, in the order the file holds them
 	randomize(rng *rand.Rand)                // small random weights, scaled to each layer's inputs
 	forward(frames [][]float32, y []float32) // y: a frame's outputs after another's
+	reach() int                              // frames either side of a frame its output reads
+	pass(ahead int) pass                     // a sequence taken as its frames come
 }
 
 const (
@@ -351,7 +420,10 @@ func (m *transformerNet) forward(frames [][]float32, y []float32) {
 		copy(x[t*per:], f)
 	}
 	for i, f := 0, cfg.Inputs; i < len(m.convs); i, f = i+1, f/m.convs[i].Pool {
-		x = m.convs[i].apply(x, T, f)
+		c := &m.convs[i]
+		y := make([]float32, T*c.Out*(f/c.Pool))
+		c.apply(x, 0, 0, T, T, f, y)
+		x = y
 	}
 	in := make([]float32, T*cfg.Dim)
 	m.in.apply(x, T, in)
@@ -366,26 +438,13 @@ func (m *transformerNet) forward(frames [][]float32, y []float32) {
 		copy(h, in)
 		for i := range tw.layers {
 			l := &tw.layers[i]
-			l.ln1.apply(h, T, n)
-			l.q.apply(n, T, q)
-			l.k.apply(n, T, k)
-			l.v.apply(n, T, v)
-			m.attend(q, k, v, T, att)
+			l.project(h, T, n, q, k, v)
+			m.attend(q, k, v, 0, T, 0, cfg.Window, T, att)
 			l.o.apply(att, T, o)
 			for j := range h {
 				h[j] += o[j]
 			}
-			l.ln2.apply(h, T, n)
-			l.ff1.apply(n, T, ff)
-			across(T, frameBlock, func(lo, hi int) {
-				for j := lo * cfg.FFN; j < hi*cfg.FFN; j++ {
-					ff[j] = gelu(ff[j])
-				}
-			})
-			l.ff2.apply(ff, T, o)
-			for j := range h {
-				h[j] += o[j]
-			}
+			l.feed(h, T, n, ff, o)
 		}
 		tw.ln.apply(h, T, n)
 		yt := make([]float32, T*tw.out.Out)
@@ -397,23 +456,25 @@ func (m *transformerNet) forward(frames [][]float32, y []float32) {
 	}
 }
 
-// attend is multi-head attention over the window: each frame weighs the frames
-// within Window of it by their keys' match to its query, less the head's slope
-// per frame of distance, and sums their values.
-func (m *transformerNet) attend(q, k, v []float32, T int, out []float32) {
+// attend is multi-head attention for frames from to to: each weighs the frames
+// within Window before it and ahead after it, none before the first or from T on,
+// by their keys' match to its query, less the head's slope per frame of distance,
+// and sums their values. q and out hold the frames from from on, k and v from base.
+func (m *transformerNet) attend(q, k, v []float32, from, to, base, ahead, T int, out []float32) {
 	cfg := m.cfg
 	dh := cfg.Dim / cfg.Heads
 	scale := float32(1 / math.Sqrt(float64(dh)))
-	across(T, frameBlock, func(from, to int) {
-		scores := make([]float32, 2*cfg.Window+1)
-		for i := from; i < to; i++ {
-			lo, hi := max(i-cfg.Window, 0), min(i+cfg.Window, T-1)
+	across(to-from, frameBlock, func(a, b int) {
+		scores := make([]float32, cfg.Window+ahead+1)
+		for i := from + a; i < from+b; i++ {
+			lo, hi := max(i-cfg.Window, 0), min(i+ahead, T-1)
 			for h := range cfg.Heads {
-				off := h * dh
-				qi := q[i*cfg.Dim+off : i*cfg.Dim+off+dh]
+				off, at := h*dh, (i-from)*cfg.Dim+h*dh
+				qi := q[at : at+dh]
 				var peak float32 = -math.MaxFloat32
 				for j := lo; j <= hi; j++ {
-					s := dot(0, qi, k[j*cfg.Dim+off:j*cfg.Dim+off+dh])
+					kj := (j-base)*cfg.Dim + off
+					s := dot(0, qi, k[kj:kj+dh])
 					d := i - j
 					if d < 0 {
 						d = -d
@@ -428,10 +489,11 @@ func (m *transformerNet) attend(q, k, v []float32, T int, out []float32) {
 					scores[j-lo] = e
 					sum += e
 				}
-				oi := out[i*cfg.Dim+off : i*cfg.Dim+off+dh]
+				oi := out[at : at+dh]
 				clear(oi)
 				for j := lo; j <= hi; j++ {
-					axpy(scores[j-lo]/sum, v[j*cfg.Dim+off:j*cfg.Dim+off+dh], oi)
+					vj := (j-base)*cfg.Dim + off
+					axpy(scores[j-lo]/sum, v[vj:vj+dh], oi)
 				}
 			}
 		}

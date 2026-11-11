@@ -7,3 +7,6 @@ func dot(s float32, a, b []float32) float32 { return dotGeneric(s, a, b) }
 
 // axpy adds w·x into y, x and y of one length
 func axpy(w float32, x, y []float32) { axpyGeneric(w, x, y) }
+
+// geluWide takes none of x: the plain function runs every value
+func geluWide([]float32) int { return 0 }

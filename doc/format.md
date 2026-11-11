@@ -196,9 +196,13 @@ kernel centred on each frame, zero past the sequence's ends:
 4. A frame's output is the cell heads, each its cells in order, then the frame
    heads, as `Outputs` lists them.
 
-`Forward` keeps float32 throughout but for a norm's mean and variance, the GELU
-and the softmax's exponential, which it takes in float64 and rounds; it agrees
-with a PyTorch model in float32 to rounding ([agent notes](agent-notes.md)).
+`Forward` keeps float32 throughout but for a norm's mean and variance and the
+softmax's exponential, which it takes in float64 and rounds. Its GELU is
+max(x, 0) − a·(Φ(−a) − Φ(−6)) over a = |x| up to 6, the difference two
+polynomials meeting at 2.5: within 4.2e-8 of the exact one below zero and
+2.6e-7 above, where a float32 itself lies up to 2.4e-7 from it, and the same
+bits on every platform. It agrees with a PyTorch model in float32 to rounding
+([agent notes](agent-notes.md)).
 
 ## What Load refuses
 

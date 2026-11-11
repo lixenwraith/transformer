@@ -33,6 +33,46 @@ that a document now states, and link the document instead.
   CGO_ENABLED=0 go test -c` binary runs on Android from `/data/local/tmp` under
   `adb shell`. A phone heats up over a run; give each `-test.cpu` a fresh start.
 
+- The GELU gives one value's bits on every kernel because no multiply is fused
+  with its add: the plain `gelu` rounds each product through `float32(...)`,
+  which the Go spec makes a barrier to fusion on arm64 and at `GOAMD64=v3`,
+  and the kernels multiply and add apart. Its minima and maxima keep a NaN:
+  x86's return their second source when either is one, which Go's assembler
+  writes first.
+- To show it after a change to `gelu`, a kernel or `geluK`, a scratch test
+  runs all 2^32 float32 through `gelu` and `geluRow` in rows of 2^16 across the
+  cores, compares their bits and sums value and bits into a checksum to carry
+  between platforms: 33 s on amd64, 11 minutes for arm64 under qemu, one sum
+  on amd64 with AVX2, at `GOAMD64=v3`, on 386 and on arm64. The same scan
+  against `math.Erf` in float64 gives the worst error the README and
+  [format.md](format.md) state.
+- `geluK`'s polynomials are minimax fits (Lawson's reweighting, 2000 Chebyshev
+  nodes) of (Φ(−u) − Φ(−s))/(s − u) over a piece ending at s, weighted by
+  u·(s − u), what an error there leaves in the GELU; each coefficient is
+  rounded to float32 from the highest down, the lower ones fitted again after
+  each. Degree 10 either side of 2.5 is where float32's own rounding, 3.7e-8
+  below zero, takes over from the fit's 2e-8; degree 9 reads 6e-8.
+
+## The pass
+
+- `Forward` and a `Stream` share each kind's arithmetic (`layer.project`,
+  `attend`, `layer.feed`, `conv.apply`; the cell net's `Forward` is blocks of
+  its stream's pass), so a change to one moves both, and
+  `TestAStreamGivesForwardsOutputs` holds them equal. Its models' biases are
+  set: `NewRandom`'s are zero, and a frame read past the sequence's end as a
+  layer's output over zeros, where the layer's own zero belongs, shows only
+  under a bias.
+- To hold `Forward`'s bits through a refactor, a scratch module with `replace`
+  to the checkout prints a hash of the outputs of several shapes and lengths
+  (both kinds, convolutions and towers, lengths under and over a block); build
+  it on main and on the branch, at `GOMAXPROCS` 1 and 4.
+- A cell net's layer starts a block only as far before it as the layers after
+  it read (`rows.reach`); starting each a block's whole reach before it cost
+  `BenchmarkCellNet` 2 to 5% on one core. Chunks of 8 frames (`cellChunk`) ran
+  slower than 16; 16, 32 and 64 ran alike.
+- A planted fault shows a test can fail. Copy the file aside first: `git
+  checkout` on it throws away the uncommitted work beside the fault.
+
 ## The float32 check
 
 - `Forward` and a trainer's model agree to float32 rounding, and only a check
