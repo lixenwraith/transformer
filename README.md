@@ -37,17 +37,18 @@ its weight file ([doc/format.md](doc/format.md)).
 
 ```go
 type Config struct {
-    Inputs   int     // features in a channel of a frame
-    Channels int     // planes of Inputs a frame lays end to end, none for one
-    Convs    []Conv  // convolutions before the input layer, none for a frame as it comes
-    Dim      int     // the width
-    Heads    int     // attention heads; Dim is a multiple of them
-    Layers   int     // blocks of the one stack, when there are no Towers
-    FFN      int     // the feed-forward's width
-    Window   int     // frames attended on either side
-    Towers   []Tower // stacks over the shared input layer, none for one stack of Layers
-    Outputs  []Head  // the output vector's named slices, in order
-    Cells    *Cells  // a cell net in place of the transformer, nil for none
+    Inputs    int        // features in a channel of a frame
+    Channels  int        // planes of Inputs a frame lays end to end, none for one
+    Convs     []Conv     // convolutions before the input layer, none for a frame as it comes
+    Dim       int        // the width
+    Heads     int        // attention heads; Dim is a multiple of them
+    Layers    int        // blocks of the one stack, when there are no Towers
+    FFN       int        // the feed-forward's width
+    Window    int        // frames attended on either side
+    Towers    []Tower    // stacks over the shared input layer, none for one stack of Layers
+    Outputs   []Head     // the output vector's named slices, in order
+    Cells     *Cells     // a cell net in place of the transformer, nil for none
+    Constants []Constant // what the trainer states of the model by name, read by no pass
 }
 
 type Conv struct{ Out, Time, Freq, Pool int } // channels out, an odd kernel of frames by features, a max-pool over features
@@ -55,6 +56,10 @@ type Tower struct{ Layers, Outputs int }      // its blocks, and how many of the
 type Head struct {
     Name string
     Size int
+}
+type Constant struct {
+    Name  string
+    Value float32
 }
 
 type Cells struct { // a cell net's sizes, doc/format.md's header in its order
@@ -65,6 +70,7 @@ type Cells struct { // a cell net's sizes, doc/format.md's header in its order
     Depth, NearTime, NearFreq       int
     Long                            []int
     First, Read, Heads, Regions     int
+    PoolFirst, PoolBins             int
     Scalars                         []int
     Frame, FrameTime                int
     AgainTime, Dilation             int
@@ -81,6 +87,7 @@ func (m *Model) Reach() int                             // frames either side of
 func (m *Model) Slice(out []float32, head string) []float32
 func (m *Model) Save(w io.Writer) error
 func (m *Model) Config() Config
+func (c Config) Constant(name string) (float32, bool) // what the trainer stated under name
 func (m *Model) Parameters() int
 
 func (s *Stream) Write(frames [][]float32) [][]float32 // the outputs these frames complete
@@ -115,8 +122,8 @@ for each of `Long`, over three frames that far apart so a cell hears further in
 time for few weights, all GELU,
 give each cell its heads through a 1×1 convolution, the same weights at every
 cell, a head of several channels laying one channel's cells after another's;
-the frame's heads come from the wide channels averaged to `Regions`, the
-`Scalars` beside them, through two convolutions over the frames and a linear
+the frame's heads come from the wide channels averaged to `Regions`, over
+every bin or the `PoolBins` from `PoolFirst`, the `Scalars` beside them, through two convolutions over the frames and a linear
 layer. Its output is the cell heads, each its cells in order, then the frame
 heads. `Forward` runs it in blocks of frames across the cores, each block
 computing again the frames around it that its outputs reach, and as one block
@@ -150,7 +157,7 @@ match.
 ## The weight file
 
 One file is one model: the magic `VIFT`, the format's version, the model's kind,
-the `Config`, every tensor by name with its dims and float32 data, little-endian, and an
+the `Config` with the constants its trainer states, every tensor by name with its dims and float32 data, little-endian, and an
 FNV-1a 64 checksum over all of it. `Load` checks the checksum, the version, the
 shape and each tensor's name and dims, and refuses a file that disagrees in any
 of them. A change to the bytes is a new version, and `Load` keeps reading the

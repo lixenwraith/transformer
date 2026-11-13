@@ -1,7 +1,7 @@
 # The weight file
 
-A weight file holds one model: its kind, its shape, the `Config`, and every
-weight in float32. `Save` writes it and `Load` reads it, and a trainer in any language can
+A weight file holds one model: its kind, its shape, the `Config`, what its
+trainer states of it, and every weight in float32. `Save` writes it and `Load` reads it, and a trainer in any language can
 write it from this document alone. Every number is little-endian, and nothing
 is padded or aligned.
 
@@ -9,7 +9,7 @@ is padded or aligned.
 
 ```
 magic      4 bytes     "VIFT" (56 49 46 54)
-version    u32         5
+version    u32         6
 kind       u32         0 a transformer, 1 a cell net
 inputs     u32         features in a channel of a frame
 channels   u32         1 or more, the planes of inputs a frame lays end to end
@@ -18,6 +18,10 @@ nheads     u32         1 to 64 output heads, then for each:
   namelen  u16           1 to 64
   name     namelen bytes, UTF-8 by convention
   size     u32           its scores per frame, 1 or more
+nconsts    u32         0 to 64 constants (version 6 on; none before), then for each:
+  namelen  u16           1 to 64
+  name     namelen bytes
+  value    f32           a number the trainer states of the model; no pass reads it
 ntensors   u32         exactly the count the shape names (below), then for each:
   namelen  u16           1 to 64
   name     namelen bytes
@@ -65,9 +69,13 @@ nscalars   u32         0 to 64, then for each:
   scalar   u32           an input of a frame, its channels end to end, the frame path reads
 nlong      u32         0 to 16, then for each (version 5 on; none before):
   long     u32           the frames apart of a convolution over the cells after the near ones
+pool       u32 × 2     the first bin the regions average and how many, 0 and 0 for
+                       every bin (version 6 on; every bin before)
 ```
 
-The header carries the `Config`: the sizes, the lists and its `Outputs`.
+The header carries the `Config`: the sizes, the lists, its `Outputs` and its
+`Constants`, which say what only the trainer knows of the model, such as what
+a head's first score stands for.
 Version 3 has no `kind` word and reads as a transformer, and version 2 no
 `channels` word either, and reads as one channel.
 
@@ -187,9 +195,11 @@ kernel centred on each frame, zero past the sequence's ends:
    over three frames `long` apart, those past the sequence zero. The 1×1 `cellout` makes the cell heads'
    channels at cells `first` to `first + read`: a cell head of size k·read takes
    the next k channels, each channel's `read` cells after the one before.
-3. The frame path averages each `wide` channel over `regions` runs of the bins,
-   run g from bin ⌊g·bins/regions⌋ to before ⌈(g+1)·bins/regions⌉ (PyTorch's
-   `adaptive_avg_pool2d`), channel by channel, then the scalars as they are.
+3. The frame path averages each `wide` channel over `regions` runs of the n
+   bins `pool` names from its first, f, or of every bin: run g from bin
+   f + ⌊g·n/regions⌋ to before f + ⌈(g+1)·n/regions⌉ (PyTorch's
+   `adaptive_avg_pool2d` over those bins), channel by channel, then the
+   scalars as they are.
    `frame1` over those, the GELU; `frame2` over frames `again spacing` apart,
    adding back its input before the GELU; then `frameout`, the frame heads end
    to end.
@@ -210,18 +220,19 @@ bits on every platform. It agrees with a PyTorch model in float32 to rounding
 
 - it is at least 8 bytes, and its last 8 are the FNV-1a 64 (offset basis
   0xcbf29ce484222325, prime 0x100000001b3) of every byte before them;
-- the magic is `VIFT`, the version 2 to 4 and the kind 0 or 1;
-- it has at most 16 convolutions, at most 16 towers and 1 to 64 output heads;
+- the magic is `VIFT`, the version 2 to 6 and the kind 0 or 1;
+- it has at most 16 convolutions, at most 16 towers, 1 to 64 output heads and
+  at most 64 constants;
 - each convolution has `out` and `pool` of 1 or more and odd `time` and `freq`;
 - each tower computes 1 or more heads and, with towers, theirs sum to `nheads`;
 - a cell net has every count 1 or more but `depth`, odd kernels, at most
   `inputs` bins and a cell of them, a frame head besides its cell heads, `read`
   cells from `first` within the cells, each cell head a multiple of `read`,
-  and each scalar within a frame;
+  the regions' bins within the bins, and each scalar within a frame;
 - `inputs`, `channels`, `features`, `dim`, `heads` and `ffn` are 1 or more, and
   `dim` a multiple of `heads`;
 - the output heads' names are 1 to 64 bytes and distinct, and each size is 1 or
-  more;
+  more; the constants' names are 1 to 64 bytes and distinct;
 - the tensors are the list above in count, names, ranks and dims, each of at
   most 2^28 floats;
 - no byte lies between the last tensor and the checksum.
@@ -235,6 +246,7 @@ an error ([todo](todo.md)).
 
 The version is the layout's: a change to these bytes bumps it, in
 `fileVersion` and here in one commit, and `Load` reads the versions it knows.
-`Save` writes 5, which added a cell net's `long`; `Load` reads 4, which added
+`Save` writes 6, which added the constants and the bins a cell net's regions
+average; `Load` reads 5, which added a cell net's `long`, 4, which added
 `kind`, 3, which added `channels`, and 2, since trained files carry them. Every file trained so far carries the magic `VIFT`, so
 a new magic is a versioned change of its own ([todo](todo.md)).
