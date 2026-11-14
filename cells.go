@@ -362,11 +362,12 @@ func (p *cellPass) advance(y []float32) int {
 
 	if to := p.upto(p.pooled.lag); to > p.pooled.made {
 		p.pooled.room(to)
+		first, bins := c.pool()
 		for t := p.pooled.made; t < to; t++ {
-			in, out := p.wide.row(t)[p.wide.from(0):], p.pooled.row(t)
+			in, out := p.wide.row(t)[p.wide.from(first):], p.pooled.row(t)
 			for ch := range c.Wide {
 				for g := range c.Regions {
-					lo, hi := g*c.Bins/c.Regions, ((g+1)*c.Bins+c.Regions-1)/c.Regions
+					lo, hi := g*bins/c.Regions, ((g+1)*bins+c.Regions-1)/c.Regions
 					var sum float32
 					for k := lo; k < hi; k++ {
 						sum += in[k*c.Wide+ch]

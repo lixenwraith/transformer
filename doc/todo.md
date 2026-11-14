@@ -8,7 +8,7 @@ Priorities: P1 is wanted next, P2 is convenient follow-up, and P3 is an idea.
 
 A change to the file's bytes takes the next version: `fileVersion` in
 `weights.go`, the layout and the tensor list in [format.md](format.md), and a
-`Load` that still reads versions 2 to 4, which trained files carry. A field a
+`Load` that still reads versions 2 to 5, which trained files carry. A field a
 `Config` gains reads zero for today's behaviour, so every `Config` literal and
 every file keeps its meaning.
 

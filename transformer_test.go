@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"math"
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -16,11 +17,12 @@ func tiny() Config {
 }
 
 // tinyCells is a cell net of every part, three channels of 21 inputs, seven
-// cells, two convolutions over them, two long ones and a cell head of two channels
+// cells, two convolutions over them, two long ones, a cell head of two channels
+// and regions over some of the bins
 func tinyCells() Config {
 	return Config{Inputs: 21, Channels: 3, Outputs: []Head{{"c1", 5}, {"c2", 10}, {"f", 3}}, Cells: &Cells{
 		Bins: 20, Reduce: 2, Wide: 3, WideTime: 3, WideFreq: 5, Cell: 4, CellTime: 3, CellFreq: 3, Stride: 3, Depth: 2, NearTime: 3, NearFreq: 3, Long: []int{2, 5},
-		First: 1, Read: 5, Heads: 2, Regions: 4, Scalars: []int{20, 62}, Frame: 5, FrameTime: 3, AgainTime: 3, Dilation: 2}}
+		First: 1, Read: 5, Heads: 2, Regions: 4, PoolFirst: 3, PoolBins: 14, Scalars: []int{20, 62}, Frame: 5, FrameTime: 3, AgainTime: 3, Dilation: 2}}
 }
 
 func frames(T, n int, seed uint64) [][]float32 {
@@ -127,15 +129,18 @@ func TestLayerNormAndGELU(t *testing.T) {
 
 // TestWeightFileRoundTrips is the file's contract: what Save wrote, Load reads
 // into the same shape with the same outputs, two channels, convolutions,
-// towers and a cell net too, as it reads versions 2 and 3, and a damaged file
-// is refused.
+// towers, constants and a cell net too, as it reads versions 2, 3 and 5, and
+// a damaged file is refused.
 func TestWeightFileRoundTrips(t *testing.T) {
 	cfg := tiny()
 	staged := tiny()
 	staged.Channels = 2
 	staged.Convs = []Conv{{Out: 2, Time: 3, Freq: 3, Pool: 1}, {Out: 3, Time: 1, Freq: 3, Pool: 2}}
 	staged.Towers = []Tower{{Layers: 1, Outputs: 1}, {Layers: 2, Outputs: 1}}
-	for _, c := range []Config{staged, tinyCells(), cfg} {
+	staged.Constants = []Constant{{"low", 21}, {"share", 0.25}}
+	whole := tinyCells() // its regions over every bin, as a file before version 6 has them
+	whole.Cells.PoolFirst, whole.Cells.PoolBins = 0, 0
+	for _, c := range []Config{staged, tinyCells(), whole, cfg} {
 		m, _ := NewRandom(c, 11)
 		var b bytes.Buffer
 		if err := m.Save(&b); err != nil {
@@ -147,6 +152,9 @@ func TestWeightFileRoundTrips(t *testing.T) {
 		}
 		if back.Parameters() != m.Parameters() || back.Config().outputSize() != c.outputSize() {
 			t.Fatalf("loaded %d parameters of %d", back.Parameters(), m.Parameters())
+		}
+		if got := back.Config(); !slices.Equal(got.Constants, c.Constants) || !reflect.DeepEqual(got.Cells, c.Cells) {
+			t.Fatalf("loaded constants %v and cells %+v, saved %v and %+v", got.Constants, got.Cells, c.Constants, c.Cells)
 		}
 		in := frames(7, c.Inputs*c.channels(), 5)
 		a, got := m.Forward(in), back.Forward(in)
@@ -168,18 +176,42 @@ func TestWeightFileRoundTrips(t *testing.T) {
 	if sl := back.Slice(c[0], "b"); len(sl) != 2 || sl[0] != c[0][3] {
 		t.Errorf("head b slice %v of %v", sl, c[0])
 	}
-	f := b.Bytes() // as version 3 wrote it, no kind after the version, and 2, no channels after the inputs
-	for v, old := range map[byte][]byte{3: slices.Concat(f[:4], []byte{3, 0, 0, 0}, f[12:len(f)-8]), 2: slices.Concat(f[:4], []byte{2, 0, 0, 0}, f[12:16], f[20:len(f)-8])} {
+	// as version 5 wrote it, no count of constants before the tensors'; 3, no
+	// kind after the version either; and 2, no channels after the inputs
+	f := b.Bytes()
+	at := bytes.Index(f, []byte("\x09\x00in.weight")) - 8
+	f = slices.Concat(f[:at], f[at+4:len(f)-8])
+	load := func(v byte, old []byte) *Model {
 		h := fnv.New64a()
 		h.Write(old)
 		m, err := Load(bytes.NewReader(binary.LittleEndian.AppendUint64(old, h.Sum64())))
-		if err != nil || m.Config().Channels != 1 {
+		if err != nil {
 			t.Fatalf("a version %d file: %v", v, err)
+		}
+		return m
+	}
+	for v, old := range map[byte][]byte{5: slices.Concat(f[:4], []byte{5, 0, 0, 0}, f[8:]), 3: slices.Concat(f[:4], []byte{3, 0, 0, 0}, f[12:]), 2: slices.Concat(f[:4], []byte{2, 0, 0, 0}, f[12:16], f[20:])} {
+		m := load(v, old)
+		if m.Config().Channels != 1 {
+			t.Fatalf("a version %d file reads %d channels", v, m.Config().Channels)
 		}
 		for i, o := range m.Forward(frames(7, cfg.Inputs, 5)) {
 			if !slices.Equal(o, c[i]) {
 				t.Fatalf("a version %d file's frame %d: %v, want %v", v, i, o, c[i])
 			}
+		}
+	}
+	// a cell net as version 5 wrote it: no bins for its regions before the heads
+	m, _ = NewRandom(whole, 11)
+	b.Reset()
+	m.Save(&b)
+	f = b.Bytes()
+	at = bytes.Index(f, []byte("\x02\x00c1")) - 4
+	old := load(5, slices.Concat(f[:4], []byte{5, 0, 0, 0}, f[8:at-8], f[at:bytes.Index(f, []byte("\x0d\x00reduce.weight"))-8], f[bytes.Index(f, []byte("\x0d\x00reduce.weight"))-4:len(f)-8]))
+	in := frames(7, whole.Inputs*whole.Channels, 5)
+	for i, o := range m.Forward(in) {
+		if !slices.Equal(o, old.Forward(in)[i]) {
+			t.Fatalf("a version 5 cell net's frame %d differs", i)
 		}
 	}
 	bad := bytes.Clone(b.Bytes())
@@ -236,7 +268,8 @@ func TestConvolutionMatchesItsDefinition(t *testing.T) {
 // TestCellNetMatchesItsDefinition: each output is the cell net's layers as
 // format.md states them, run in float64 over the whole sequence as PyTorch pads
 // it, though Forward runs it in blocks over cores, its biases not zero, a cell
-// head of two channels laid one channel's cells after the other's.
+// head of two channels laid one channel's cells after the other's, the regions
+// over the bins they name.
 func TestCellNetMatchesItsDefinition(t *testing.T) {
 	cfg := tinyCells()
 	m, _ := NewRandom(cfg, 5)
@@ -316,7 +349,7 @@ func TestCellNetMatchesItsDefinition(t *testing.T) {
 				continue
 			}
 			r := i % c.Regions
-			from, to := r*c.Bins/c.Regions, int(math.Ceil(float64((r+1)*c.Bins)/float64(c.Regions)))
+			from, to := c.PoolFirst+r*c.PoolBins/c.Regions, c.PoolFirst+int(math.Ceil(float64((r+1)*c.PoolBins)/float64(c.Regions)))
 			var s float64
 			for k := from; k < to; k++ {
 				s += wide[i/c.Regions][tt][k]

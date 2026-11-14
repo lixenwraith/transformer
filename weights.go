@@ -17,9 +17,10 @@ import (
 // Load reads oldestVersion on: a trained file keeps the version it was written in.
 const (
 	fileMagic     = "VIFT"
-	fileVersion   = 5
+	fileVersion   = 6
 	oldestVersion = 2
 	maxName       = 64
+	maxConstants  = 64
 	maxTensor     = 1 << 28 // floats in one tensor
 )
 
@@ -89,6 +90,12 @@ func (m *Model) Save(w io.Writer) error {
 		put(uint16(len(o.Name)))
 		bw.WriteString(o.Name)
 		put(uint32(o.Size))
+	}
+	put(uint32(len(cfg.Constants)))
+	for _, k := range cfg.Constants {
+		put(uint16(len(k.Name)))
+		bw.WriteString(k.Name)
+		put(math.Float32bits(k.Value))
 	}
 	ts := m.net.tensors()
 	put(uint32(len(ts)))
@@ -182,6 +189,22 @@ func Load(r io.Reader) (*Model, error) {
 			return nil, err
 		}
 		cfg.Outputs = append(cfg.Outputs, Head{Name: name, Size: int(size)})
+	}
+	if version >= 6 {
+		if err := get(&u32); err != nil || u32 > maxConstants {
+			return nil, errors.New("transformer: constants")
+		}
+		for range u32 {
+			name, err := readName()
+			if err != nil {
+				return nil, err
+			}
+			var bits uint32
+			if err := get(&bits); err != nil {
+				return nil, err
+			}
+			cfg.Constants = append(cfg.Constants, Constant{Name: name, Value: math.Float32frombits(bits)})
+		}
 	}
 	m, err := newModel(cfg)
 	if err != nil {
@@ -292,6 +315,7 @@ func saveCells(put func(...int), c Config) {
 	put(c.Cells.Scalars...)
 	put(len(c.Cells.Long))
 	put(c.Cells.Long...)
+	put(c.Cells.PoolFirst, c.Cells.PoolBins)
 }
 
 func loadCells(get func() (int, error), version int, c *Config) error {
@@ -318,5 +342,8 @@ func loadCells(get func() (int, error), version int, c *Config) error {
 			return err
 		}
 	}
-	return nil
+	if version < 6 {
+		return nil
+	}
+	return fill(get, &c.Cells.PoolFirst, &c.Cells.PoolBins)
 }

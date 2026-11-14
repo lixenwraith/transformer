@@ -11,6 +11,13 @@ type Head struct {
 	Size int
 }
 
+// Constant is a number a trainer states of its model under a name the caller
+// knows: the file carries it and no pass reads it
+type Constant struct {
+	Name  string
+	Value float32
+}
+
 // Conv is one convolution over the frames as an image, frames by features: Out
 // channels from the last's (the Config's at the first), a kernel of Time frames
 // by Freq features centred on each, the edges zero, GELU, then the features
@@ -29,19 +36,31 @@ type Tower struct {
 // to end (none: one), the convolutions before the input layer, the width, the
 // attention heads and layers, the feed-forward width, the frames attended to
 // either side, the towers (none: one of Layers computing every head), and the
-// output heads. Cells, when given, is the model in place of all between.
+// output heads. Cells, when given, is the model in place of all between, and
+// Constants what its trainer states beside it.
 type Config struct {
-	Inputs   int
-	Channels int
-	Convs    []Conv
-	Dim      int
-	Heads    int
-	Layers   int
-	FFN      int
-	Window   int
-	Towers   []Tower
-	Outputs  []Head
-	Cells    *Cells
+	Inputs    int
+	Channels  int
+	Convs     []Conv
+	Dim       int
+	Heads     int
+	Layers    int
+	FFN       int
+	Window    int
+	Towers    []Tower
+	Outputs   []Head
+	Cells     *Cells
+	Constants []Constant
+}
+
+// Constant is the value the trainer stated under name, and whether it stated one
+func (c Config) Constant(name string) (float32, bool) {
+	for _, k := range c.Constants {
+		if k.Name == name {
+			return k.Value, true
+		}
+	}
+	return 0, false
 }
 
 // Cells is a convolutional net over the frames as an image, the same weights at
@@ -60,6 +79,7 @@ type Cells struct {
 	First, Read               int   // the first cell the cell heads read, and how many
 	Heads                     int   // how many of Outputs, from the first, are per cell
 	Regions                   int   // runs of bins each wide channel averages to for the frame path
+	PoolFirst, PoolBins       int   // the first bin they average and how many, none for every bin
 	Scalars                   []int // inputs of a frame, across its channels, the frame path reads as they are
 	Frame, FrameTime          int   // channels and frames of the frame path's convolution,
 	AgainTime, Dilation       int   // then its second's frames, Dilation apart, added back
@@ -67,6 +87,14 @@ type Cells struct {
 
 // cells is how many cells the convolution to cells makes of the bins
 func (c *Cells) cells() int { return (c.Bins+c.CellFreq/2-c.CellFreq)/c.Stride + 1 }
+
+// pool is the bins the regions average: the first, and how many
+func (c *Cells) pool() (first, bins int) {
+	if c.PoolBins == 0 {
+		return 0, c.Bins
+	}
+	return c.PoolFirst, c.PoolBins
+}
 
 // pooled is what the frame path's first convolution reads a frame as
 func (c *Cells) pooled() int { return c.Wide*c.Regions + len(c.Scalars) }
@@ -105,6 +133,9 @@ func (c Config) validateCells() error {
 	}
 	if n.First < 0 || n.First+n.Read > n.cells() {
 		return fmt.Errorf("transformer: the cell heads read %d cells from %d of %d", n.Read, n.First, n.cells())
+	}
+	if n.PoolFirst < 0 || n.PoolBins < 0 || n.PoolFirst+n.PoolBins > n.Bins || n.PoolBins == 0 && n.PoolFirst != 0 {
+		return fmt.Errorf("transformer: the regions average %d bins from %d of %d", n.PoolBins, n.PoolFirst, n.Bins)
 	}
 	for _, h := range c.Outputs[:n.Heads] {
 		if h.Size < 1 || h.Size%n.Read != 0 {
@@ -177,6 +208,13 @@ func (c Config) validate() error {
 			return fmt.Errorf("transformer: output head %q of %d", h.Name, h.Size)
 		}
 		seen[h.Name] = true
+	}
+	clear(seen)
+	for _, k := range c.Constants {
+		if k.Name == "" || seen[k.Name] {
+			return fmt.Errorf("transformer: constant %q", k.Name)
+		}
+		seen[k.Name] = true
 	}
 	return nil
 }
