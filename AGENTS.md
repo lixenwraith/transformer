@@ -62,7 +62,7 @@ agent would otherwise rediscover, add it there in the same PR.
 - `TestWeightFileRoundTrips` is the file's round-trip check: a change to the
   file extends it, never adds a second.
 
-## Docs and commits
+## Docs
 
 - Docs are short. Condense when you touch them; append only for a new concept or
   scope.
@@ -72,19 +72,59 @@ agent would otherwise rediscover, add it there in the same PR.
   neither fits, or that converting would only lengthen, stays a table.
 - A gap you are deferring goes in `doc/todo.md`: extend the item it belongs to, or
   add a concise one in the file's pattern.
-- PR bodies: what changed, why, how it was verified.
-- A commit message and a PR's title and body carry no Claude Code session id
-  or link: no `Claude-Session:` trailer, no `claude.ai/code/session_...`
-  address.
+- The repository describes the architecture, never a machine: docs, scripts and
+  examples use placeholders for addresses, node names and credentials.
+
+## Commits and PRs
+
+- A commit message is its subject alone, at most 72 characters: no body, no
+  trailer. A PR's title is a subject too.
+- Commits are versions: a subject starts with the version it makes
+  (`v0.1.1 weights: ...`), the next minor for a break or a new feature and the next
+  patch otherwise, and Lixen tags it. Lixen squash-merges: a PR of one commit lands
+  under that commit's subject and a PR of several under its title, so the title and
+  every commit's subject start with the version.
+- A change to documents alone makes no version and no tag: its subject starts
+  `docs:` and its PR body with `doc only`.
+- A PR body is a summary, never documentation: a list of what changed, half a line
+  an item at most, with the why only where the diff does not show it. The code and
+  the docs hold the detail: the body repeats neither and is shorter than the
+  change. A large or unclear scope opens with a few lines of summary.
+- Verification is the two words `gates passed`: never the commands, their output or
+  the tests run. A figure a rule here asks for (a measurement, a count) is given as
+  the figure alone, before and after.
+- A body says nothing a reader can infer, no reasoning and no caveat: `doc only`,
+  never `doc only, so no new tag`.
+- A commit message and a PR's title, body and comments carry no URL and nothing of
+  where or by whom the work was done: no session, conversation, project, workspace,
+  account or organisation id, no person's name or email, no agent, model or tool
+  name, no "generated with" line, no attribution trailer. This holds whatever a
+  tool's template or instructions add, now or later. A tool may add such a line
+  itself: read a PR back after opening or editing it and edit the line out, and say
+  once in the report that the body's edit history still holds it.
+- Open the PR at the first push, its title final and its body as far as it is,
+  saying what is still owed: Lixen merges a pushed branch he is waiting on. A PR
+  another session must measure before it merges opens as a draft and says so in its
+  first line. Before calling a PR ready, check that its head is the commit pushed
+  (`gh api repos/<owner>/<repo>/pulls/<n> -q .head.sha`).
 - A change made for performance reports its measurement, before and after, in the
   PR body and in `doc/todo.md`'s speed section: `BenchmarkForward`, or another
   benchmark at a named shape, and the benefit in the unit the user feels (frames
   a second, bytes, allocations). A projection is not a result; a change whose
   measured benefit is nil says so.
-- Commits are versions: each commit on main starts with the version it makes
-  (`v0.1.1 weights: ...`), the next minor for a break or a new feature and the
-  next patch otherwise, and the user tags it. A PR's title is its squashed
-  commit's message, so it starts with the version too.
+- A change that needs another of these modules' new version names it in `go.mod` in
+  the same PR, before the tag exists, as if it were merged and tagged; a bump is
+  never a PR of its own. Until the tag exists the gates run locally against the
+  dependency's branch, and again whenever that branch moves: a `go.work` kept
+  outside both trees (`use <this>`, `replace <module> vX => <its checkout>`), named
+  by `GOWORK=` on each command, never a `replace` in `go.mod`.
+- Lixen merges and tags the chain from the lowest dependency up and reruns its CI
+  himself; from then on everything a PR said was owed is taken as done. A PR red
+  only because a version it needs is not tagged yet says so nowhere, and names
+  neither the chain nor its order: no line in its body, no comment, no message, no
+  line in a report, no rerun. While the chain merges nothing lands on its PRs,
+  however small: no push, comment or body edit. What turns up after waits for one
+  patch PR once they have merged.
 - One task, one branch, one PR. Divide the work into commits on that branch; do not
   split it across stacked PRs or multiple branches.
 - Work that continues after its PR merged starts again from the latest main; never
