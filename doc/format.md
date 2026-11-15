@@ -248,5 +248,5 @@ The version is the layout's: a change to these bytes bumps it, in
 `fileVersion` and here in one commit, and `Load` reads the versions it knows.
 `Save` writes 6, which added the constants and the bins a cell net's regions
 average; `Load` reads 5, which added a cell net's `long`, 4, which added
-`kind`, 3, which added `channels`, and 2, since trained files carry them. Every file trained so far carries the magic `VIFT`, so
-a new magic is a versioned change of its own ([todo](todo.md)).
+`kind`, 3, which added `channels`, and 2. Every version's magic is `VIFT`, so a
+new magic is a versioned change of its own ([todo](todo.md)).

@@ -160,8 +160,8 @@ One file is one model: the magic `VIFT`, the format's version, the model's kind,
 the `Config` with the constants its trainer states, every tensor by name with its dims and float32 data, little-endian, and an
 FNV-1a 64 checksum over all of it. `Load` checks the checksum, the version, the
 shape and each tensor's name and dims, and refuses a file that disagrees in any
-of them. A change to the bytes is a new version, and `Load` keeps reading the
-versions trained files carry.
+of them. A change to the bytes is a new version; `Save` writes 6 and `Load`
+reads 2 to 6.
 
 ---
 
