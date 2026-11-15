@@ -8,9 +8,8 @@ Priorities: P1 is wanted next, P2 is convenient follow-up, and P3 is an idea.
 
 A change to the file's bytes takes the next version: `fileVersion` in
 `weights.go`, the layout and the tensor list in [format.md](format.md), and a
-`Load` that still reads versions 2 to 5, which trained files carry. A field a
-`Config` gains reads zero for today's behaviour, so every `Config` literal and
-every file keeps its meaning.
+`Load` that still reads versions 2 to 6. A field a `Config` gains reads zero for
+today's behaviour, so every `Config` literal and every file keeps its meaning.
 
 ## Hardening
 
@@ -86,10 +85,9 @@ block, no frame around a block computed again: 3150 frames a second near and
 The plain loops ran `BenchmarkForward` a fifth as fast as the kernels, both
 with `math.Erf`: 390 frames a second against 1977 on an earlier Xeon, 421
 against 2071 on one core of a Pixel 8 Pro (Tensor G3), whose nine cores ran
-1376. A 30 s rip with 12a on the Pixel, 2584 frames, took 2.56 s on one core
-and 1.07 s on nine. The NEON GELU has run only under qemu: a phone's figures
-with it are unmeasured. `GOEXPERIMENT=simd`'s package would make every
-importer set the experiment, so the kernels are assembly.
+1376. The NEON GELU has run only under qemu: a phone's figures with it are
+unmeasured. `GOEXPERIMENT=simd`'s package would make every importer set the
+experiment, so the kernels are assembly.
 
 ### Bring a short stream nearer Forward
 
@@ -146,10 +144,10 @@ rows against one or two patches, which shares its loads, would near double it:
 - Affected files: `transformer.go` (`across`, `linear.apply`), `kernel_arm64.s`
 
 On the Pixel the nine cores trail one over `BenchmarkForward`'s 512 frames, and
-four only draw level, though nine win over a clip's 2584. Unmeasured: the
-A510s' share of a layer's blocks, the shared caches the cores' weight reads
-contend for, and the clock a phone holds with every core busy. A kernel keeping
-a weight row in registers across a block's frames cuts the reads again.
+four only draw level. Unmeasured: the A510s' share of a layer's blocks, the
+shared caches the cores' weight reads contend for, and the clock a phone holds
+with every core busy. A kernel keeping a weight row in registers across a
+block's frames cuts the reads again.
 
 ### Run a batch of sequences in one call
 
@@ -194,5 +192,5 @@ runs without Python.
 - Priority: P3
 - Affected files: `weights.go`, [format.md](format.md)
 
-The magic `VIFT` is in every file trained so far. A new magic starts a version,
-and `Load` keeps reading `VIFT` with the versions before it.
+Every version's magic is `VIFT`. A new magic starts a version, and `Load` keeps
+reading `VIFT` with the versions before it.

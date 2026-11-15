@@ -78,9 +78,9 @@ that a document now states, and link the document instead.
 - `Forward` and a trainer's model agree to float32 rounding, and only a check
   shows it: redo it after any change to the forward pass or the file, and before
   trusting a file a changed trainer wrote. The reference trainer is rip-train,
-  in `github.com/lixenwraith/stapes` (until it moves, `tool/rip-train` in
-  `github.com/lixenwraith/vif`): `ripmodel.py` builds the same model in PyTorch
-  (`Config`, `RipModel`) and its `export` writes the file.
+  `tool/rip-train` in `github.com/lixenwraith/stapes`: `ripmodels.py` builds the
+  same model in PyTorch (`Config`, `FrameModel`) and its `export` writes the
+  file.
 - A CPU PyTorch installs in a container in about three minutes (`pip install
   torch --index-url https://download.pytorch.org/whl/cpu`, then `numpy`).
 - From the trainer's folder, in Python: seed torch, build a model, add
@@ -88,40 +88,33 @@ that a document now states, and link the document instead.
   are not 1 and 0, run frames through it in `eval()` under `torch.no_grad()`,
   `export` it, and write the frames and the outputs as raw little-endian
   float32. The trainer's own frames are the realistic input
-  (`ripmodel.features(train.MelFile(path)[:])` on a corpus loop); any frames
+  (`ripmodels.features(train.MelFile(path)[:])` on a corpus loop); any frames
   exercise the path.
 - In Go, a scratch module with `replace github.com/lixenwraith/transformer =>`
   the checkout: `Load` the file, `Forward` the frames, and take the largest
   difference from PyTorch's outputs.
 - Check two shapes: the trainer's default and one with convolutions and towers
   (`convs=[(4, 3, 3, 1), (6, 1, 5, 2)], towers=[(2, 2), (3, 7)]` at width 32),
-  which together cover every tensor and both namings. On 862 frames of a corpus
-  loop the largest differences were 8.6e-6 at width 256 with four layers, on
-  outputs up to 6.4, and 1.8e-6 with the convolutions and towers, on outputs up
-  to 2.7. A difference orders of magnitude past those is a mismatch, not
-  rounding.
+  which together cover every tensor and both namings. Rounding leaves the
+  largest difference near a millionth of the largest output; one orders of
+  magnitude past that is a mismatch.
 - A change to the input checks both shapes again at `channels=2` too, on
-  `ripmodel.features(mel, 2)`. On 862 frames of a piano recording the largest
-  differences were 9.2e-6 at the default shape and 4.2e-6 to 5.4e-6 with the
-  convolutions and towers over three seeds, as one channel read on those frames
-  (3.1e-6 to 4.7e-6).
+  `ripmodels.features(mel, 2)`, over three seeds.
 
 - The cell net's check is the rip trainer's `PitchNet` (`ripmodels.py` in
   stapes), whose `export` writes version 6: build it at the trainer's shape,
   perturb every parameter as above, run the output of `features(mel, 2)`
   through it, and dump `model.stack(x)`, the 16 channels of 214 Go reads, with
   the outputs. Its heads lie in the trainer's order, so compare them by name
-  (`Slice`). On 600 and 2000 frames over three seeds the largest differences
-  were 2.4e-6 to 5.1e-6 on outputs up to 4.3 to 11.1, and the bits the same on
-  one to four cores. `TestCellNetMatchesItsDefinition` covers what PitchNet
-  has none of yet: two `near` convolutions, a cell head of two channels.
-  At version 6, PitchNet over the piano's 88 pitches (270 bins, its regions
-  over bins 21 to 233) and a file's constant read back: 2.2e-5 on outputs up to
-  17.8 over 1,723 frames, 1.1e-5 on outputs up to 11 at 213 bins with every bin
-  pooled, and the frame model 9.1e-6 and 7.6e-6 on outputs up to 7.1 and 7.8.
+  (`Slice`); the bits are the same on one to four cores.
+  `TestCellNetMatchesItsDefinition` covers what PitchNet has none of yet: two
+  `near` convolutions, a cell head of two channels. At version 6 the check runs
+  PitchNet over the piano's 88 pitches too (270 bins, its regions over bins 21
+  to 233) with a file's constant read back, at 213 bins with every bin pooled,
+  and the frame model.
 
 ## Model
 
-- `Conv` and `Tower` are in no trained file yet, but trainers try them in their
-  rounds: they are not dead code. Keep them, their loader and their round-trip
+- `Conv` and `Tower` are in the format, and `Load` reads them, for a trainer to
+  try: they are not dead code. Keep them, their loader and their round-trip
   test.
