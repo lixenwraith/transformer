@@ -99,14 +99,16 @@ that a document now states, and link the document instead.
   largest difference near a millionth of the largest output; one orders of
   magnitude past that is a mismatch.
 - A change to the input checks both shapes again at `channels=2` too, on
-  `ripmodels.features(mel, 2)`, over three seeds.
+  `ripmodels.features(frames, 2)`, the band frames' two planes in dB, over
+  three seeds.
 
 - The cell net's check is the rip trainer's `PitchNet` (`ripmodels.py` in
   stapes), whose `export` writes version 6: build it at the trainer's shape,
-  perturb every parameter as above, run the output of `features(mel, 2)`
-  through it, and dump `model.stack(x)`, the 16 channels of 214 Go reads, with
-  the outputs. Its heads lie in the trainer's order, so compare them by name
-  (`Slice`); the bits are the same on one to four cores.
+  perturb every parameter as above, run the output of `features(frames, 4)`,
+  the four planes a notes model hears, through it, and dump `model.stack(x)`,
+  the 32 channels of 271 Go reads, with the outputs. Its heads lie in the
+  trainer's order, so compare them by name (`Slice`); the bits are the same
+  on one to four cores.
   `TestCellNetMatchesItsDefinition` covers what PitchNet has none of yet: two
   `near` convolutions, a cell head of two channels. At version 6 the check runs
   PitchNet over the piano's 88 pitches too (270 bins, its regions over bins 21
