@@ -46,13 +46,15 @@ subtracts.
 
 ## Speed
 
-The benchmarks run the rip's shapes. A frame is 256 samples at 22050 Hz to the
-rip, 86 a second of audio.
+The benchmarks run shapes near the rip's, not its own of today: its frame
+model reads 632 inputs in two channels into 407 outputs, and its notes model
+32 channels of 271 inputs, 90 cells and 4,530 outputs with 199,925 weights. A
+frame is 256 samples at 22050 Hz to the rip, 86 a second of audio.
 
 - `BenchmarkForward`: a width-256 model of eight heads, four layers, a
   feed-forward of 1024 and a window of 64, over 512 frames of 230 inputs into
   318 outputs, 8.2 MB a call.
-- `BenchmarkCellNet`: the rip's notes model, 16 channels of 214 inputs, 71
+- `BenchmarkCellNet`: a notes model of 16 channels of 214 inputs, 71
   cells and 318 outputs, over 2584 frames, 30 s; `near` without long
   convolutions, 169,862 weights, and `long` with `Long` 3, 9 and 27, 197,606.
 - `BenchmarkStream`: their frames through a stream, 43 a write as the rip's
