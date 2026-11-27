@@ -120,3 +120,10 @@ that a document now states, and link the document instead.
 - `Conv` and `Tower` are in the format, and `Load` reads them, for a trainer to
   try: they are not dead code. Keep them, their loader and their round-trip
   test.
+- **A key's bias moves no output**: it adds one number to all of a query's
+  scores, which the softmax takes out. A test that a weight moves a head's
+  outputs reads it apart, though a digest holds it, as a weight of its tower.
+- **The tests' `frames` gives every frame alike**: frame t is the first n
+  weights of a row of n, each frame the same. Attention over them weighs every
+  frame alike and no query or key weight moves an output, so a test of what
+  attention reads lays frames unlike each other.

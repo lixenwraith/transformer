@@ -273,6 +273,7 @@ type Model struct {
 // net is a model kind's layers
 type net interface {
 	tensors() []tensor                       // every weight, in the order the file holds them
+	path(named []bool) ([]int, []tensor)     // what the named of Outputs read (Model.Digest)
 	randomize(rng *rand.Rand)                // small random weights, scaled to each layer's inputs
 	forward(frames [][]float32, y []float32) // y: a frame's outputs after another's
 	reach() int                              // frames either side of a frame its output reads

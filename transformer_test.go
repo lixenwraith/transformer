@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -221,6 +222,95 @@ func TestWeightFileRoundTrips(t *testing.T) {
 	}
 	if _, err := Load(bytes.NewReader(b.Bytes()[:len(b.Bytes())/2])); err == nil {
 		t.Error("a truncated file loaded")
+	}
+}
+
+// TestADigestIsWhatItsHeadsRead: a weight moves a digest of heads where it moves
+// their outputs and nowhere else, in either kind and in towers, a key's bias
+// (alike at every frame a query weighs) staying in its tower's; a head grown
+// after them leaves it, a window or a long convolution's spacing moves it on the
+// heads that read it, and a head the model lacks is named.
+func TestADigestIsWhatItsHeadsRead(t *testing.T) {
+	staged := tiny()
+	staged.Channels = 2
+	staged.Convs = []Conv{{Out: 2, Time: 3, Freq: 3, Pool: 1}, {Out: 3, Time: 1, Freq: 3, Pool: 2}}
+	staged.Towers = []Tower{{Layers: 1, Outputs: 1}, {Layers: 2, Outputs: 1}}
+	cells := tinyCells()
+	cells.Outputs = append(cells.Outputs, Head{"g", 2})
+	digest := func(m *Model, heads []string) uint64 {
+		d, err := m.Digest(heads...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	for _, c := range []struct {
+		cfg   Config
+		heads [][]string
+		grown Head
+		apart func(*Config)
+	}{
+		{tiny(), [][]string{{"a"}, {"b"}, {"a", "b"}}, Head{"c", 2}, func(c *Config) { c.Window++ }},
+		{staged, [][]string{{"a"}, {"b"}}, Head{}, func(c *Config) { c.Window++ }},
+		{cells, [][]string{{"c1"}, {"c2"}, {"f"}, {"g"}, {"c1", "f"}}, Head{"h", 1}, func(c *Config) {
+			k := *c.Cells
+			k.Long = []int{2, 6}
+			c.Cells = &k
+		}},
+	} {
+		m, _ := NewRandom(c.cfg, 3)
+		in := make([][]float32, 9) // frames unlike each other, or attention weighs alike
+		for f := range in {
+			in[f] = make([]float32, c.cfg.Inputs*c.cfg.channels())
+			for i := range in[f] {
+				in[f][i] = float32(math.Sin(1.3*float64(f) + 0.7*float64(i) + 0.1*float64(f*i)))
+			}
+		}
+		for _, heads := range c.heads {
+			was, out := digest(m, heads), m.Forward(in)
+			for _, w := range m.net.tensors() {
+				for _, i := range []int{0, len(w.data) / 2, len(w.data) - 1} {
+					v := w.data[i]
+					w.data[i] += 0.5
+					moved, heard := digest(m, heads) != was, false
+					for f, o := range m.Forward(in) {
+						for _, h := range heads {
+							heard = heard || !slices.Equal(m.Slice(o, h), m.Slice(out[f], h))
+						}
+					}
+					if w.data[i] = v; moved != heard && !(moved && strings.HasSuffix(w.name, ".k.bias")) {
+						t.Errorf("%v of %s[%d]: the digest moved %v, the outputs %v", heads, w.name, i, moved, heard)
+					}
+				}
+			}
+			apart := c.cfg
+			c.apart(&apart)
+			a, _ := NewRandom(apart, 3)
+			long := slices.ContainsFunc(heads, func(h string) bool { return h[0] == 'c' })
+			if moved := digest(a, heads) != was; moved != (c.cfg.Cells == nil || long) {
+				t.Errorf("%v: another window or long convolution moved the digest %v", heads, moved)
+			}
+		}
+		if c.grown.Size == 0 {
+			continue
+		}
+		grown := c.cfg // a cell net's grows a frame head
+		grown.Outputs = append(slices.Clone(c.cfg.Outputs), c.grown)
+		g, _ := NewRandom(grown, 5)
+		for i, w := range g.net.tensors() {
+			copy(w.data, m.net.tensors()[i].data) // the heads before it: their rows lie first
+		}
+		all := make([]string, 0, len(c.cfg.Outputs))
+		for _, h := range c.cfg.Outputs {
+			all = append(all, h.Name)
+		}
+		if digest(g, all) != digest(m, all) {
+			t.Errorf("a head grown after %v moved their digest", all)
+		}
+	}
+	m, _ := NewRandom(tiny(), 3)
+	if _, err := m.Digest("a", "none"); err == nil || !strings.Contains(err.Error(), `"none"`) {
+		t.Errorf("a head the model lacks: %v", err)
 	}
 }
 
@@ -536,21 +626,22 @@ func TestAStreamCutShortAttendsOnlyTheFramesItWaits(t *testing.T) {
 	}
 }
 
-// BenchmarkForward is the baseline for performance work: 3.3 million weights,
-// width 256 in eight heads, four layers, a feed-forward of 1024 and a window of
-// 64 frames either side, run over 512 frames of 230 inputs into 318 outputs, on
-// GOMAXPROCS cores (-cpu sets them).
+// BenchmarkForward is the baseline for performance work, the rip's frame model
+// of today: 3.4 million weights, width 256 in eight heads, four layers, a
+// feed-forward of 1024 and a window of 64 frames either side, run over 512
+// frames of 316 inputs in two channels into 407 outputs, on GOMAXPROCS cores
+// (-cpu sets them).
 func BenchmarkForward(b *testing.B) {
 	m, in := benchTransformer(b)
 	bench(b, len(in), func() { m.Forward(in) })
 }
 
 func benchTransformer(b *testing.B) (*Model, [][]float32) {
-	m, err := NewRandom(Config{Inputs: 230, Dim: 256, Heads: 8, Layers: 4, FFN: 1024, Window: 64, Outputs: []Head{{"y", 318}}}, 1)
+	m, err := NewRandom(Config{Inputs: 316, Channels: 2, Dim: 256, Heads: 8, Layers: 4, FFN: 1024, Window: 64, Outputs: []Head{{"y", 407}}}, 1)
 	if err != nil {
 		b.Fatal(err)
 	}
-	return m, frames(512, m.cfg.Inputs, 2)
+	return m, frames(512, m.cfg.Inputs*m.cfg.Channels, 2)
 }
 
 // bench times f, which runs T frames, and reports them a second
@@ -583,25 +674,19 @@ func BenchmarkKernels(b *testing.B) {
 	}
 }
 
-// BenchmarkCellNet is the cell net's: the rip's notes model of 16 channels of 214
-// inputs, 71 cells and 318 outputs, over 2584 frames, 30 s, without and with the
-// long convolutions that take it from 169,862 weights to 197,606.
+// BenchmarkCellNet is the cell net's, the rip's notes model of today: 32
+// channels of 271 inputs, 88 cells, long convolutions 3, 9 and 27 frames apart
+// and fifteen heads of 4,532 outputs, 200,055 weights, over 2584 frames, 30 s.
 func BenchmarkCellNet(b *testing.B) {
-	for _, c := range []struct {
-		name string
-		long []int
-	}{{"near", nil}, {"long", []int{3, 9, 27}}} {
-		b.Run(c.name, func(b *testing.B) {
-			m, in := benchCellNet(b, c.long)
-			bench(b, len(in), func() { m.Forward(in) })
-		})
-	}
+	m, in := benchCellNet(b)
+	bench(b, len(in), func() { m.Forward(in) })
 }
 
-func benchCellNet(b *testing.B, long []int) (*Model, [][]float32) {
-	cfg := Config{Inputs: 214, Channels: 16, Outputs: []Head{{"pitch", 69}, {"strike", 69}, {"release", 69}, {"velocity", 69}, {"frame", 42}}, Cells: &Cells{
-		Bins: 213, Reduce: 8, Wide: 16, WideTime: 3, WideFreq: 39, Cell: 32, CellTime: 7, CellFreq: 3, Stride: 3, Depth: 1, NearTime: 7, NearFreq: 3, Long: long,
-		First: 1, Read: 69, Heads: 4, Regions: 16, Scalars: []int{213, 1925}, Frame: 64, FrameTime: 5, AgainTime: 9, Dilation: 2}}
+func benchCellNet(b *testing.B) (*Model, [][]float32) {
+	cfg := Config{Inputs: 271, Channels: 32, Outputs: []Head{{"pitch", 88}, {"strike", 88}, {"release", 88}, {"velocity", 88}, {"cents", 176},
+		{"pitchfamily", 704}, {"pitchwave", 440}, {"pitchvoice", 2816}, {"onset", 1}, {"drums", 3}, {"voicing", 1}, {"wave", 5}, {"voice", 32}, {"struck", 1}, {"sure", 1}},
+		Cells: &Cells{Bins: 270, Reduce: 8, Wide: 16, WideTime: 3, WideFreq: 39, Cell: 32, CellTime: 7, CellFreq: 3, Stride: 3, Depth: 1, NearTime: 7, NearFreq: 3,
+			Long: []int{3, 9, 27}, First: 1, Read: 88, Heads: 8, Regions: 16, Scalars: []int{270, 2438, 4606, 6774}, Frame: 64, FrameTime: 5, AgainTime: 9, Dilation: 2}}
 	m, err := NewRandom(cfg, 1)
 	if err != nil {
 		b.Fatal(err)
@@ -611,10 +696,10 @@ func benchCellNet(b *testing.B, long []int) (*Model, [][]float32) {
 
 // BenchmarkStream is the two benchmarks' frames through a stream, 43 a write
 // as the rip's half second: the transformer waiting its reach and waiting 46
-// frames, and the cell net with its long convolutions.
+// frames, and the cell net.
 func BenchmarkStream(b *testing.B) {
 	t, tin := benchTransformer(b)
-	c, cin := benchCellNet(b, []int{3, 9, 27})
+	c, cin := benchCellNet(b)
 	for _, s := range []struct {
 		name  string
 		m     *Model
