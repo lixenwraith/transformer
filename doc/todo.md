@@ -28,6 +28,47 @@ before `newModel` runs. `Forward` copies frames without checking their length: o
 longer than `Inputs` × `Channels` spills into the next frame's place, which a shorter next
 frame does not wholly overwrite. It should refuse both.
 
+## Blocks
+
+### Put a convolution in a block (a Conformer's)
+
+- Priority: P2
+- Affected files: `config.go` (`Config`), `transformer.go` (`layer`, `forward`),
+  `stream.go` (`transformerPass`), `kernel_*`, `weights.go`,
+  [format.md](format.md)
+
+A block is attention and a feed-forward. A Conformer's has a convolution
+between them: a norm, a 1×1 to twice the width, a gate that halves it, a
+depthwise convolution over an odd count of frames, a norm, a swish, a 1×1, and
+the block's input added back. It hears what lies beside a frame through weights
+of its own, where attention weighs a frame by its distance alone (`slopes`). A
+field on `Config`, its zero no convolution, gives the kernel's frames, and a
+block gains its tensors after the attention's. What it has to settle:
+
+- the norm inside: a Conformer's is over a batch, which a trainer folds into the
+  depthwise weights at export, so a file holds none;
+- a stream: its pass holds the kernel's frames of every block, and a model's
+  reach grows by half a kernel a block;
+- the kernels: the depthwise pass is a `dot` a channel, and the swish wants one
+  beside `geluWide`.
+
+It lands with the first model trained with it and the bench at that model's
+shape, with and without: the rip's frame model is the one that would
+([stapes' todo](https://github.com/lixenwraith/stapes/blob/main/doc/todo.md#give-the-frame-models-blocks-a-convolution-and-a-gated-feed-forward)).
+
+### Offer a gated feed-forward (GeGLU, SwiGLU)
+
+- Priority: P3
+- Affected files: `config.go` (`Config`), `transformer.go` (`layer`),
+  `kernel_*`, `weights.go`, [format.md](format.md)
+
+The feed-forward is a layer, a GELU and a layer. A gated one splits the first
+layer's output in two and multiplies one half, through a GELU or a swish, by
+the other: `ff1` twice as wide for the same hidden width, or the hidden width
+two thirds for the same weights. A field on `Config`, its zero today's, names
+the gate; no tensor is added. It lands with the first model trained with it,
+after the convolution above is read, each by itself.
+
 ## Position biases
 
 ### Offer other position biases than ALiBi
