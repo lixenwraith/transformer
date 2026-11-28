@@ -242,6 +242,26 @@ on a 32-bit platform a size of 2^31 or more reads negative and is refused. A
 header naming a shape too large to allocate panics today instead of returning
 an error ([todo](todo.md)).
 
+## The digest
+
+`Model.Digest` over a set of heads is the FNV-1a 64 of these, little-endian,
+in order; tensor names are not in it, so a stack renamed `towers.0.` when
+towers are added keeps its digest:
+
+- the sizes the heads' arithmetic takes that no tensor's dims state, a u32
+  each: a transformer's `inputs`, `channels`, `heads`, `window` and each
+  convolution's `pool`; a cell net's `inputs`, `channels` and `bins`, then
+  with a cell head `stride`, `first`, `read`, `nlong` and each `long`, and
+  with a frame head `regions`, the pool's first bin and count, `dilation`,
+  `nscalars` and each scalar;
+- each tensor their outputs read, in the file's order, as its rank and dims
+  (u32 each) and its floats: a transformer's convolutions and input layer and,
+  of each stack computing one of them, its blocks, its norm and those heads'
+  rows of `out`; a cell net's `reduce` and `wide`, then with a cell head
+  `cells`, `near`, `long` and those heads' channels of `cellout`, and with a
+  frame head `frame1`, `frame2` and their rows of `frameout`. A tensor cut to
+  some rows states that many.
+
 ## Versions
 
 The version is the layout's: a change to these bytes bumps it, in

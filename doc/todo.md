@@ -46,23 +46,24 @@ subtracts.
 
 ## Speed
 
-The benchmarks run shapes near the rip's, not its own of today: its frame
-model reads 632 inputs in two channels into 407 outputs, and its notes model
-32 channels of 271 inputs, 90 cells and 4,530 outputs with 199,925 weights. A
-frame is 256 samples at 22050 Hz to the rip, 86 a second of audio.
+The benchmarks run the rip's shapes of today. A frame is 256 samples at 22050
+Hz to the rip, 86 a second of audio.
 
-- `BenchmarkForward`: a width-256 model of eight heads, four layers, a
-  feed-forward of 1024 and a window of 64, over 512 frames of 230 inputs into
-  318 outputs, 8.2 MB a call.
-- `BenchmarkCellNet`: a notes model of 16 channels of 214 inputs, 71
-  cells and 318 outputs, over 2584 frames, 30 s; `near` without long
-  convolutions, 169,862 weights, and `long` with `Long` 3, 9 and 27, 197,606.
+- `BenchmarkForward`: the frame model, 3,426,199 weights, width 256 in eight
+  heads, four layers, a feed-forward of 1024 and a window of 64, over 512
+  frames of 316 inputs in two channels into 407 outputs, 9.4 MB a call.
+- `BenchmarkCellNet`: the notes model, 200,055 weights, 32 channels of 271
+  inputs, 88 cells, `Long` 3, 9 and 27, 4,532 outputs, over 2584 frames, 30 s.
 - `BenchmarkStream`: their frames through a stream, 43 a write as the rip's
-  half second, the cell net's with `Long`.
+  half second.
 
-Frames a second on a 4-vCPU Xeon with AVX2, medians of five, one `-cpu` a
-process, with the GELU a `math.Erf` a value and with it over a row in the
-kernels:
+Their figures on a 4-core i7-7700HQ laptop wait for it to be quiet: beside a
+GPU training a run spread up to fourfold, one core's `Forward` alone holding,
+1,683 frames a second (five runs, 1,626 to 1,764). The table is the shapes
+before, a frame model of 230 inputs into 318 outputs and a notes model of 16
+channels of 214, 71 cells and 318 outputs, near and with `Long`, frames a second
+on a 4-vCPU Xeon with AVX2, medians of five, one `-cpu` a process, with the GELU
+a `math.Erf` a value and with it over a row in the kernels:
 
 ```
                                     math.Erf a value     a row in the kernels

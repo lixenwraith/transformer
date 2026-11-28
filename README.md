@@ -89,6 +89,7 @@ func (m *Model) Save(w io.Writer) error
 func (m *Model) Config() Config
 func (c Config) Constant(name string) (float32, bool) // what the trainer stated under name
 func (m *Model) Parameters() int
+func (m *Model) Digest(heads ...string) (uint64, error) // what the named heads read
 
 func (s *Stream) Write(frames [][]float32) [][]float32 // the outputs these frames complete
 func (s *Stream) Close() [][]float32                   // the rest, the sequence ending
@@ -162,6 +163,14 @@ FNV-1a 64 checksum over all of it. `Load` checks the checksum, the version, the
 shape and each tensor's name and dims, and refuses a file that disagrees in any
 of them. A change to the bytes is a new version; `Save` writes 6 and `Load`
 reads 2 to 6.
+
+A **digest** (`Model.Digest`) names what some heads read: an FNV-1a 64 over
+the weights their outputs depend on and the sizes their arithmetic takes that
+no tensor's dims state ([format.md](doc/format.md#the-digest)). A head trained
+beside them on the same trunk, or another head's rows changed, leaves it; any
+weight on their path moves it. What is fitted on those heads' outputs is bound
+to them by it: it outlives a pass that trains other heads alone and goes with
+the trunk it read.
 
 ---
 

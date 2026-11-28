@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"runtime"
+	"slices"
 	"sync"
 )
 
@@ -42,25 +43,55 @@ func newCellNet(cfg Config) net {
 }
 
 func (n *cellNet) tensors() []tensor {
-	type layer struct {
-		name string
-		c    *conv
-		dims int
-	}
-	ls := []layer{{"reduce", &n.reduce, 4}, {"wide", &n.wide, 4}, {"cells", &n.cells, 4}}
+	return slices.Concat(n.trunk(), n.cellPath(), convTensors("cellout", &n.cellout, 4), n.framePath(), convTensors("frameout", &n.frameout, 2))
+}
+
+// convTensors is a convolution's weight of its first dims of out, in, frames
+// and features, and its bias
+func convTensors(name string, c *conv, dims int) []tensor {
+	return []tensor{{name + ".weight", []int{c.Out, c.in, c.Time, c.Freq}[:dims], c.W}, {name + ".bias", []int{c.Out}, c.B}}
+}
+
+// trunk is what every head reads: the 1×1 convolution and the wide one
+func (n *cellNet) trunk() []tensor {
+	return slices.Concat(convTensors("reduce", &n.reduce, 4), convTensors("wide", &n.wide, 4))
+}
+
+// cellPath is what the cell heads read after the trunk, before their 1×1
+func (n *cellNet) cellPath() []tensor {
+	ts := convTensors("cells", &n.cells, 4)
 	for i := range n.near {
-		ls = append(ls, layer{fmt.Sprintf("near.%d", i), &n.near[i], 4})
+		ts = append(ts, convTensors(fmt.Sprintf("near.%d", i), &n.near[i], 4)...)
 	}
 	for i := range n.long {
-		ls = append(ls, layer{fmt.Sprintf("long.%d", i), &n.long[i], 4})
-	}
-	ls = append(ls, layer{"cellout", &n.cellout, 4}, layer{"frame1", &n.frame1, 3}, layer{"frame2", &n.frame2, 3}, layer{"frameout", &n.frameout, 2})
-	var ts []tensor
-	for _, l := range ls {
-		dims := []int{l.c.Out, l.c.in, l.c.Time, l.c.Freq}[:l.dims]
-		ts = append(ts, tensor{l.name + ".weight", dims, l.c.W}, tensor{l.name + ".bias", []int{l.c.Out}, l.c.B})
+		ts = append(ts, convTensors(fmt.Sprintf("long.%d", i), &n.long[i], 4)...)
 	}
 	return ts
+}
+
+// framePath is what the frame heads read after the trunk, before their linear layer
+func (n *cellNet) framePath() []tensor {
+	return slices.Concat(convTensors("frame1", &n.frame1, 3), convTensors("frame2", &n.frame2, 3))
+}
+
+// path is what the named heads of Outputs read: the sizes no tensor's dims
+// state, the trunk, then the cell path and the named cell heads' channels of
+// the 1×1 when any is named, and the frame path and their rows of its linear
+// layer when a frame head is
+func (n *cellNet) path(named []bool) ([]int, []tensor) {
+	c, outs := n.cfg.Cells, n.cfg.Outputs
+	sizes, ts := []int{n.cfg.Inputs, n.cfg.channels(), c.Bins}, n.trunk()
+	if cell := named[:c.Heads]; slices.Contains(cell, true) {
+		sizes = append(append(sizes, c.Stride, c.First, c.Read, len(c.Long)), c.Long...)
+		ts = append(ts, n.cellPath()...)
+		ts = append(ts, picked("cellout", n.cellout.W, n.cellout.B, headRows(outs[:c.Heads], cell, c.Read))...)
+	}
+	if frame := named[c.Heads:]; slices.Contains(frame, true) {
+		sizes = append(append(sizes, c.Regions, c.PoolFirst, c.PoolBins, c.Dilation, len(c.Scalars)), c.Scalars...)
+		ts = append(ts, n.framePath()...)
+		ts = append(ts, picked("frameout", n.frameout.W, n.frameout.B, headRows(outs[c.Heads:], frame, 1))...)
+	}
+	return sizes, ts
 }
 
 func (n *cellNet) randomize(rng *rand.Rand) {
